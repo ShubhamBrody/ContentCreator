@@ -325,7 +325,7 @@ class VideoGenerator:
         duration: float,
     ) -> None:
         """Generate a video clip with Ken Burns (zoom/pan) effect."""
-        from moviepy.editor import ImageClip  # type: ignore[import-untyped]
+        from moviepy import ImageClip  # type: ignore[import-untyped]
 
         image = Image.open(image_path).convert("RGB")
         img_array = np.array(image)
@@ -373,11 +373,8 @@ class VideoGenerator:
             frame = PILImage.fromarray(cropped).resize((w, h), PILImage.LANCZOS)
             return np.array(frame)
 
-        clip = ImageClip(img_array).set_duration(duration).set_fps(30)
-        clip = clip.fl(lambda gf, t: make_frame(t), apply_to=["mask"])
-
-        # Override get_frame directly for Ken Burns
-        clip = clip.set_make_frame(make_frame)
+        clip = ImageClip(img_array, duration=duration)
+        clip = clip.with_fps(30).with_updated_frame_function(make_frame)
 
         clip.write_videofile(
             output_path,
@@ -399,7 +396,7 @@ class VideoGenerator:
         fps: int,
     ) -> None:
         """Save a list of PIL images as a video file."""
-        from moviepy.editor import ImageSequenceClip  # type: ignore[import-untyped]
+        from moviepy import ImageSequenceClip  # type: ignore[import-untyped]
 
         frame_arrays = [np.array(f) for f in frames]
         clip = ImageSequenceClip(frame_arrays, fps=fps)

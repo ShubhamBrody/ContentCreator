@@ -51,7 +51,7 @@ class VideoAssembler:
         Returns:
             Path to the final video
         """
-        from moviepy.editor import (  # type: ignore[import-untyped]
+        from moviepy import (  # type: ignore[import-untyped]
             AudioFileClip,
             CompositeAudioClip,
             CompositeVideoClip,
@@ -97,12 +97,13 @@ class VideoAssembler:
                 # Extend or trim video to match audio length
                 if clip.duration < audio_clip.duration:
                     # Loop video to match audio duration
-                    clip = clip.loop(duration=audio_clip.duration)
+                    from moviepy.video.fx import Loop
+                    clip = clip.with_effects([Loop(duration=audio_clip.duration)])
                 else:
-                    clip = clip.subclip(0, audio_clip.duration)
-                clip = clip.set_audio(audio_clip)
+                    clip = clip.subclipped(0, audio_clip.duration)
+                clip = clip.with_audio(audio_clip)
             else:
-                clip = clip.set_duration(scene.duration_seconds)
+                clip = clip.with_duration(scene.duration_seconds)
 
             # Add subtitles for this scene
             if subtitles and i < len(subtitles) and subtitles[i]:
@@ -132,14 +133,13 @@ class VideoAssembler:
 
             # Loop music if shorter than video
             if music_clip.duration < final_clip.duration:
-                music_clip = music_clip.audio_loop(
-                    duration=final_clip.duration
-                )
+                from moviepy.audio.fx import AudioLoop
+                music_clip = music_clip.with_effects([AudioLoop(duration=final_clip.duration)])
             else:
-                music_clip = music_clip.subclip(0, final_clip.duration)
+                music_clip = music_clip.subclipped(0, final_clip.duration)
 
             # Reduce music volume
-            music_clip = music_clip.volumex(music_volume)
+            music_clip = music_clip.with_volume_scaled(music_volume)
 
             # Mix with existing audio
             if final_clip.audio is not None:
@@ -149,7 +149,7 @@ class VideoAssembler:
             else:
                 final_audio = music_clip
 
-            final_clip = final_clip.set_audio(final_audio)
+            final_clip = final_clip.with_audio(final_audio)
 
         # =====================================================================
         # 4. Export final video
@@ -185,7 +185,7 @@ class VideoAssembler:
         parsed_script: ParsedScript,
     ) -> Any:
         """Concatenate clips with transitions between scenes."""
-        from moviepy.editor import concatenate_videoclips  # type: ignore[import-untyped]
+        from moviepy import concatenate_videoclips  # type: ignore[import-untyped]
 
         transition_clips = []
         for i, clip in enumerate(clips):
@@ -195,11 +195,13 @@ class VideoAssembler:
                 transition = SceneTransition.CUT
 
             if transition == SceneTransition.FADE and i > 0:
-                clip = clip.fadein(0.5)
+                from moviepy.video.fx import FadeIn, FadeOut
+                clip = clip.with_effects([FadeIn(0.5)])
                 if i < len(clips) - 1:
-                    clip = clip.fadeout(0.5)
+                    clip = clip.with_effects([FadeOut(0.5)])
             elif transition == SceneTransition.CROSSFADE and i > 0:
-                clip = clip.crossfadein(0.5)
+                from moviepy.video.fx import CrossFadeIn
+                clip = clip.with_effects([CrossFadeIn(0.5)])
 
             transition_clips.append(clip)
 
@@ -223,7 +225,7 @@ class VideoAssembler:
         height: int,
     ) -> Any:
         """Overlay subtitle text onto a video clip."""
-        from moviepy.editor import CompositeVideoClip, TextClip  # type: ignore[import-untyped]
+        from moviepy import CompositeVideoClip, TextClip  # type: ignore[import-untyped]
 
         sub_config = self.config.subtitles
         font_size = sub_config.get("font_size", 48)
@@ -246,18 +248,18 @@ class VideoAssembler:
             try:
                 txt_clip = (
                     TextClip(
-                        seg.text,
-                        fontsize=font_size,
+                        text=seg.text,
+                        font_size=font_size,
                         color=color,
                         stroke_color=stroke_color,
                         stroke_width=stroke_width,
                         method="caption",
                         size=(width - 80, None),
                         font="Arial-Bold",
+                        duration=seg.end - seg.start,
                     )
-                    .set_position(("center", y_pos))
-                    .set_start(seg.start)
-                    .set_duration(seg.end - seg.start)
+                    .with_position(("center", y_pos))
+                    .with_start(seg.start)
                 )
                 subtitle_clips.append(txt_clip)
             except Exception as e:
