@@ -94,6 +94,7 @@ class ScriptParser:
         platform: Platform = Platform.REELS,
         num_scenes: Optional[int] = None,
         characters: Optional[list[dict[str, Any]]] = None,
+        max_retries: int = 3,
     ) -> ParsedScript:
         """
         Parse a raw script/idea into structured scenes.
@@ -102,6 +103,8 @@ class ScriptParser:
             script: Raw script text or video idea
             platform: Target platform (affects scene count and pacing)
             num_scenes: Optional override for number of scenes
+            characters: Optional list of character dicts
+            max_retries: Number of attempts if LLM returns invalid JSON
 
         Returns:
             ParsedScript with structured scenes
@@ -110,24 +113,39 @@ class ScriptParser:
 
         user_prompt = self._build_user_prompt(script, platform, num_scenes, characters)
 
-        # Call Ollama API
-        response_text = await self._call_ollama(user_prompt)
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    console.print(f"[yellow]Retry {attempt}/{max_retries}...[/yellow]")
 
-        # Parse JSON from response
-        parsed_data = self._extract_json(response_text)
+                # Call Ollama API
+                response_text = await self._call_ollama(user_prompt)
 
-        # Add platform info
-        parsed_data["platform"] = platform.value
+                # Parse JSON from response
+                parsed_data = self._extract_json(response_text)
 
-        # Validate with Pydantic
-        parsed_script = ParsedScript(**parsed_data)
+                # Add platform info
+                parsed_data["platform"] = platform.value
 
-        console.print(
-            f"[green]✓ Parsed {parsed_script.scene_count} scenes "
-            f"({parsed_script.total_duration:.0f}s total)[/green]"
+                # Validate with Pydantic
+                parsed_script = ParsedScript(**parsed_data)
+
+                console.print(
+                    f"[green]✓ Parsed {parsed_script.scene_count} scenes "
+                    f"({parsed_script.total_duration:.0f}s total)[/green]"
+                )
+
+                return parsed_script
+
+            except (ValueError, json.JSONDecodeError, Exception) as e:
+                last_error = e
+                console.print(f"[red]Attempt {attempt} failed: {e}[/red]")
+
+        raise RuntimeError(
+            f"Script parsing failed after {max_retries} attempts. "
+            f"Last error: {last_error}"
         )
-
-        return parsed_script
 
     def _build_user_prompt(
         self,
@@ -174,7 +192,7 @@ Break this into scenes. Respond with ONLY the JSON."""
         return prompt
 
     async def _call_ollama(self, user_prompt: str) -> str:
-        """Call the Ollama generate API."""
+        """Call the Ollama chat API with JSON format enforcement."""
         url = f"{self.base_url}/api/chat"
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -182,6 +200,7 @@ Break this into scenes. Respond with ONLY the JSON."""
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            "format": "json",          # Force Ollama to return valid JSON
             "stream": False,
             "options": {
                 "temperature": self.temperature,
@@ -189,7 +208,7 @@ Break this into scenes. Respond with ONLY the JSON."""
             },
         }
 
-        console.print("[dim]Calling Ollama API...[/dim]")
+        console.print("[dim]Calling Ollama API (JSON mode)...[/dim]")
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(url, json=payload)
@@ -203,28 +222,73 @@ Break this into scenes. Respond with ONLY the JSON."""
         return content
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
-        """Extract JSON from LLM response, handling markdown code blocks."""
+        """Extract JSON from LLM response with robust sanitization."""
         # Try to find JSON in code blocks first
         json_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if json_match:
             text = json_match.group(1)
 
-        # Try to find raw JSON object
+        # Strip leading/trailing whitespace
         text = text.strip()
+
+        # Find the outermost JSON object
         if not text.startswith("{"):
-            # Find the first { and last }
             start = text.find("{")
             end = text.rfind("}")
             if start != -1 and end != -1:
                 text = text[start : end + 1]
 
+        # --- Sanitize common LLM JSON issues ---
+        # Remove single-line comments  (// ...)
+        text = re.sub(r'//[^\n]*', '', text)
+        # Remove trailing commas before } or ]
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        # Replace single quotes with double quotes (crude but useful)
+        # Only if the text doesn't already parse
         try:
-            data: Dict[str, Any] = json.loads(text)
-            return data
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Failed to parse LLM response as JSON: {e}[/red]")
-            console.print(f"[dim]Raw response:\n{text[:500]}[/dim]")
-            raise ValueError(
-                "LLM did not return valid JSON. "
-                "Try again or use a different model."
-            ) from e
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Attempt fixing common issues
+        fixed = text
+        # Replace NaN / Infinity (not valid JSON)
+        fixed = re.sub(r'\bNaN\b', 'null', fixed)
+        fixed = re.sub(r'\bInfinity\b', '999999', fixed)
+        # Remove control characters except newline/tab
+        fixed = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', fixed)
+
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+
+        # Last resort: try to find a JSON array in the "scenes" key
+        # Sometimes LLMs wrap the object in extra text
+        scenes_match = re.search(r'"scenes"\s*:\s*\[', fixed)
+        if scenes_match:
+            # Find the balanced object that contains this
+            depth = 0
+            obj_start = None
+            for i, ch in enumerate(fixed):
+                if ch == '{' and obj_start is None:
+                    obj_start = i
+                    depth = 1
+                elif ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0 and obj_start is not None:
+                        candidate = fixed[obj_start : i + 1]
+                        candidate = re.sub(r',\s*([}\]])', r'\1', candidate)
+                        try:
+                            return json.loads(candidate)
+                        except json.JSONDecodeError:
+                            obj_start = None
+
+        console.print(f"[red]Failed to parse LLM response as JSON[/red]")
+        console.print(f"[dim]Raw response (first 800 chars):\n{text[:800]}[/dim]")
+        raise ValueError(
+            "LLM did not return valid JSON. "
+            "Try again or use a different model."
+        )

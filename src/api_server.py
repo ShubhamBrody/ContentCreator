@@ -5,7 +5,7 @@ Provides REST API + SSE progress streaming for the React frontend.
 Bridges the web UI to the pipeline engine.
 
 Run:
-    uvicorn src.api_server:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn src.api_server:app --host 0.0.0.0 --port 8001 --reload
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -102,7 +103,25 @@ async def _progress_callback(
 async def _run_pipeline_job(
     job_id: str, config: Config, params: Dict[str, Any]
 ) -> None:
-    """Execute the pipeline and update progress in jobs dict."""
+    """Run the pipeline in a background thread so the event loop stays free."""
+
+    def _sync_run():
+        """Execute pipeline in its own event loop (runs in a worker thread)."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_pipeline_work(job_id, config, params))
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_sync_run, daemon=True)
+    thread.start()
+
+
+async def _pipeline_work(
+    job_id: str, config: Config, params: Dict[str, Any]
+) -> None:
+    """The actual pipeline execution (runs inside the worker thread's loop)."""
     try:
         jobs[job_id]["status"] = "running"
         pipeline = Pipeline(config)
