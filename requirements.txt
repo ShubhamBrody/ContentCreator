@@ -35,3 +35,8 @@ pydantic>=2.0.0
 # Utilities
 tqdm>=4.65.0
 opencv-python>=4.8.0
+
+# Backend API (for React frontend)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9

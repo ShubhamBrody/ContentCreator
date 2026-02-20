@@ -13,7 +13,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, Coroutine, List, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -55,6 +55,7 @@ class Pipeline:
         num_scenes: Optional[int] = None,
         characters: Optional[List[dict]] = None,
         character_style: Optional[str] = None,
+        progress_callback: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
     ) -> str:
         """
         Run the full pipeline: script → final video.
@@ -67,10 +68,16 @@ class Pipeline:
             characters: Optional list of character dicts with keys:
                         name, description, photo_path (optional), traits (optional)
             character_style: Sketch style (stick_figure, cartoon, manga, doodle, whiteboard)
+            progress_callback: Optional async callback(stage, status, message)
+                               for reporting progress to a frontend.
 
         Returns:
             Path to the final video file
         """
+
+        async def _report(stage: str, status: str, message: str = "") -> None:
+            if progress_callback:
+                await progress_callback(stage, status, message)
         start_time = time.time()
         stages = self.config.pipeline.get("stages", [])
 
@@ -93,6 +100,7 @@ class Pipeline:
         # =================================================================
         if "script_parse" in stages:
             console.print(Panel("[bold]Stage 1/8: Parsing Script[/bold]"))
+            await _report("script_parse", "running", "Parsing script with LLM...")
             parsed_script = await self.script_parser.parse(
                 script, platform, num_scenes, characters=characters
             )
@@ -104,6 +112,7 @@ class Pipeline:
                 f.write(parsed_script.model_dump_json(indent=2))
 
             self._print_scene_summary(parsed_script)
+            await _report("script_parse", "completed", f"Parsed {parsed_script.scene_count} scenes")
         else:
             raise RuntimeError("script_parse stage is required.")
 
@@ -116,6 +125,7 @@ class Pipeline:
 
         if characters and "character_design" in stages:
             console.print(Panel("[bold]Stage 1.5/8: Designing Characters[/bold]"))
+            await _report("character_design", "running", "Designing character sketches...")
             sketch_dir = str(Path(temp_dir) / "characters")
             os.makedirs(sketch_dir, exist_ok=True)
 
@@ -177,6 +187,7 @@ class Pipeline:
             console.print(
                 f"[green]✓ Created {len(sketch_paths)} character sketches[/green]"
             )
+            await _report("character_design", "completed", f"Created {len(sketch_paths)} character sketches")
         elif characters:
             # Characters defined but stage disabled — still pass style context
             char_defs_basic = [
@@ -198,11 +209,13 @@ class Pipeline:
         audio_files: List[str] = []
         if "tts" in stages:
             console.print(Panel("[bold]Stage 2/8: Generating Voiceover[/bold]"))
+            await _report("tts", "running", "Generating voiceover audio...")
             audio_dir = str(Path(temp_dir) / "audio")
             audio_files = await self.tts_engine.generate_scene_audio(
                 parsed_script, audio_dir
             )
             artifacts.scene_audio_files = audio_files
+            await _report("tts", "completed", f"Generated {len(audio_files)} audio files")
 
         # =================================================================
         # Stage 3: Image Generation
@@ -210,11 +223,13 @@ class Pipeline:
         image_files: List[str] = []
         if "image_gen" in stages:
             console.print(Panel("[bold]Stage 3/8: Generating Images[/bold]"))
+            await _report("image_gen", "running", "Generating scene images with SDXL...")
             image_dir = str(Path(temp_dir) / "images")
             image_files = await self.image_generator.generate_scene_images(
                 parsed_script, image_dir
             )
             artifacts.scene_image_files = image_files
+            await _report("image_gen", "completed", f"Generated {len(image_files)} images")
 
         # =================================================================
         # Stage 4: Video Generation
@@ -222,11 +237,13 @@ class Pipeline:
         video_files: List[str] = []
         if "video_gen" in stages:
             console.print(Panel("[bold]Stage 4/8: Generating Video Clips[/bold]"))
+            await _report("video_gen", "running", "Generating video clips...")
             video_dir = str(Path(temp_dir) / "videos")
             video_files = await self.video_generator.generate_scene_videos(
                 parsed_script, video_dir
             )
             artifacts.scene_video_files = video_files
+            await _report("video_gen", "completed", f"Generated {len(video_files)} video clips")
 
         # =================================================================
         # Stage 5: Music Generation
@@ -234,6 +251,7 @@ class Pipeline:
         music_path: Optional[str] = None
         if "music_gen" in stages:
             console.print(Panel("[bold]Stage 5/8: Generating Music[/bold]"))
+            await _report("music_gen", "running", "Generating background music...")
             music_file = str(Path(temp_dir) / "background_music.wav")
             music_path = await self.music_generator.generate_music(
                 prompt=parsed_script.music_prompt,
@@ -242,6 +260,7 @@ class Pipeline:
             )
             if music_path:
                 artifacts.music_file = music_path
+            await _report("music_gen", "completed", "Background music generated")
 
         # =================================================================
         # Stage 6: Subtitles
@@ -249,16 +268,19 @@ class Pipeline:
         subtitles: Optional[List[List[SubtitleSegment]]] = None
         if "subtitles" in stages and audio_files:
             console.print(Panel("[bold]Stage 6/8: Generating Subtitles[/bold]"))
+            await _report("subtitles", "running", "Generating word-level subtitles...")
             srt_dir = str(Path(temp_dir) / "subtitles")
             subtitles = await self.subtitle_generator.generate_subtitles(
                 audio_files, srt_dir
             )
+            await _report("subtitles", "completed", "Subtitles generated")
 
         # =================================================================
         # Stage 7: Assembly
         # =================================================================
         if "assemble" in stages:
             console.print(Panel("[bold]Stage 7/8: Assembling Final Video[/bold]"))
+            await _report("assemble", "running", "Assembling final video...")
             final_path = str(
                 Path(project_dir) / f"{project_name}.{self.config.output.get('format', 'mp4')}"
             )
@@ -271,6 +293,7 @@ class Pipeline:
                 output_path=final_path,
             )
             artifacts.final_video_path = final_video
+            await _report("assemble", "completed", "Final video assembled!")
 
         # =================================================================
         # Done
