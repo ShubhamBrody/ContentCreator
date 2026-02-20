@@ -99,6 +99,10 @@ class ScriptParser:
         """
         Parse a raw script/idea into structured scenes.
 
+        If the script already contains explicit Scene/Voiceover/Image-prompt
+        blocks, it is parsed directly without calling the LLM.
+        Otherwise the LLM is used to decompose free-form text.
+
         Args:
             script: Raw script text or video idea
             platform: Target platform (affects scene count and pacing)
@@ -109,6 +113,18 @@ class ScriptParser:
         Returns:
             ParsedScript with structured scenes
         """
+
+        # ── Fast path: detect pre-structured scripts ────────────────────
+        structured = self._try_structured_parse(script, platform)
+        if structured is not None:
+            console.print(Panel("[bold green]Detected pre-structured script — skipping LLM[/bold green]"))
+            console.print(
+                f"[green]✓ Parsed {structured.scene_count} scenes "
+                f"({structured.total_duration:.0f}s total)[/green]"
+            )
+            return structured
+
+        # ── Slow path: ask the LLM to decompose the script ─────────────
         console.print(Panel(f"[bold cyan]Parsing script with {self.model}[/bold cyan]"))
 
         user_prompt = self._build_user_prompt(script, platform, num_scenes, characters)
@@ -145,6 +161,128 @@ class ScriptParser:
         raise RuntimeError(
             f"Script parsing failed after {max_retries} attempts. "
             f"Last error: {last_error}"
+        )
+
+    # -----------------------------------------------------------------
+    # Structured-script detector & parser
+    # -----------------------------------------------------------------
+
+    # Patterns that match common structured-script formats:
+    #   "Scene 1:", "Scene 2 -", "SCENE 3.", etc.
+    _SCENE_HEADER_RE = re.compile(
+        r"^(?:scene|Scene|SCENE)\s*(\d+)\s*[:\-.]?\s*$", re.MULTILINE
+    )
+    # Label lines: "Voiceover:", "VO:", "Narration:", "Image-prompt:", "Image prompt:", "Visual:", etc.
+    _LABEL_RE = re.compile(
+        r"^\s*(?P<label>voiceover|vo|narration|narrator|text"
+        r"|image[- ]?prompt|visual|image|img)"
+        r"\s*[:\-]\s*(?P<value>.*)",
+        re.IGNORECASE,
+    )
+
+    def _try_structured_parse(
+        self, script: str, platform: Platform
+    ) -> Optional[ParsedScript]:
+        """
+        Attempt to parse a script that already has explicit
+        Scene / Voiceover / Image-prompt blocks.
+
+        Returns a ParsedScript if at least 2 scenes were found, else None.
+        """
+        # Quick heuristic: need at least 2 "Scene N" headers
+        headers = list(self._SCENE_HEADER_RE.finditer(script))
+        if len(headers) < 2:
+            return None
+
+        # ── Extract the title (text before the first Scene header) ──────
+        preamble = script[: headers[0].start()].strip()
+        # First non-empty line of preamble is the title
+        title_line = ""
+        description = ""
+        for line in preamble.splitlines():
+            stripped = line.strip()
+            if stripped and not title_line:
+                title_line = stripped
+            elif stripped and title_line:
+                description = stripped
+                break
+        title = title_line or "Untitled Video"
+
+        # ── Split into scene chunks ─────────────────────────────────────
+        scene_chunks: list[str] = []
+        for i, hdr in enumerate(headers):
+            start = hdr.end()
+            end = headers[i + 1].start() if i + 1 < len(headers) else len(script)
+            scene_chunks.append(script[start:end])
+
+        # ── Parse each chunk into narration + image_prompt ──────────────
+        TRANSITIONS = ["cut", "fade", "crossfade", "zoom_in"]
+        scenes = []
+        for idx, chunk in enumerate(scene_chunks, start=1):
+            narration = ""
+            image_prompt = ""
+            current_label: Optional[str] = None
+            current_buf: list[str] = []
+
+            def _flush():
+                nonlocal narration, image_prompt
+                if current_label is None:
+                    return
+                text = " ".join(current_buf).strip()
+                # Strip markdown bold/italic markers for cleaner TTS
+                text = re.sub(r"[*_]{1,2}", "", text)
+                if current_label in ("voiceover", "vo", "narration", "narrator", "text"):
+                    narration = text
+                elif current_label in ("image-prompt", "image prompt", "imageprompt",
+                                       "visual", "image", "img"):
+                    image_prompt = text
+
+            for line in chunk.splitlines():
+                m = self._LABEL_RE.match(line)
+                if m:
+                    _flush()
+                    current_label = m.group("label").lower().replace(" ", "-")
+                    # Normalize common variants
+                    if current_label in ("vo", "narrator", "text"):
+                        current_label = "voiceover"
+                    if current_label in ("visual", "img"):
+                        current_label = "image-prompt"
+                    current_buf = [m.group("value").strip()] if m.group("value").strip() else []
+                else:
+                    stripped = line.strip()
+                    if stripped:
+                        current_buf.append(stripped)
+            _flush()
+
+            if not narration and not image_prompt:
+                continue
+
+            # Estimate duration from word count (~3 words/sec for voiceover)
+            word_count = len(narration.split()) if narration else 6
+            duration = max(3.0, min(round(word_count / 2.8, 1), 10.0))
+
+            scenes.append({
+                "scene_number": idx,
+                "title": f"Scene {idx}",
+                "narration": narration or f"Scene {idx}",
+                "image_prompt": image_prompt or narration or f"Scene {idx}",
+                "characters_in_scene": [],
+                "character_actions": None,
+                "character_emotions": None,
+                "duration_seconds": duration,
+                "transition": TRANSITIONS[idx % len(TRANSITIONS)],
+                "music_mood": "cinematic",
+            })
+
+        if len(scenes) < 2:
+            return None
+
+        return ParsedScript(
+            title=title,
+            description=description or f"{len(scenes)}-scene video",
+            platform=platform,
+            music_prompt="cinematic background score matching the mood of each scene",
+            scenes=scenes,
         )
 
     def _build_user_prompt(
