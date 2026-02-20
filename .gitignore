@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project outputs
+output/
+temp/
+*.mp4
+*.mp3
+*.wav
+*.png
+*.jpg
+*.jpeg
+!templates/*.png
+!templates/*.jpg
+
+# Models cache
+models_cache/
+.cache/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Environment
+.env

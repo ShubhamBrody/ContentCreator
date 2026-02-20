@@ -1,0 +1,112 @@
+# ==============================================================================
+# ContentCreator - AI Video & Reel Generation Engine
+# ==============================================================================
+# Configuration file for the entire pipeline.
+# All models run locally on GPU. No paid APIs required.
+# ==============================================================================
+
+# --- LLM (Script Parsing & Scene Planning) ---
+llm:
+  provider: "ollama"
+  model: "glm-4.7-flash:latest"      # or "llama3", "mistral"
+  base_url: "http://localhost:11434"
+  temperature: 0.7
+  max_tokens: 4096
+
+# --- Text-to-Speech ---
+tts:
+  engine: "coqui"                     # "coqui" (XTTS v2) or "piper"
+  model: "tts_models/multilingual/multi-dataset/xtts_v2"
+  language: "en"
+  speaker_wav: null                   # Path to reference audio for voice cloning
+  speed: 1.0
+
+# --- Image Generation ---
+image:
+  engine: "sdxl"                      # "sdxl" or "sd15"
+  model: "stabilityai/stable-diffusion-xl-base-1.0"
+  refiner: "stabilityai/stable-diffusion-xl-refiner-1.0"
+  use_refiner: false                  # Enable for higher quality (uses more VRAM)
+  width: 1024
+  height: 1024
+  num_inference_steps: 30
+  guidance_scale: 7.5
+  negative_prompt: "blurry, low quality, distorted, deformed, ugly, bad anatomy"
+
+# --- Video Generation ---
+video:
+  engine: "svd"                       # "svd" (Stable Video Diffusion) or "animatediff" or "image_motion"
+  model: "stabilityai/stable-video-diffusion-img2vid-xt"
+  num_frames: 25                      # ~3 seconds at 8fps
+  fps: 8
+  motion_bucket_id: 127              # Higher = more motion
+  noise_aug_strength: 0.02
+  decode_chunk_size: 8
+  # Fallback: image_motion uses Ken Burns effect (no GPU needed for this stage)
+  image_motion:
+    zoom_range: [1.0, 1.15]
+    pan_range: [-0.05, 0.05]
+    duration_per_scene: 5             # seconds
+
+# --- Music Generation ---
+music:
+  engine: "musicgen"                  # "musicgen" or "none"
+  model: "facebook/musicgen-small"    # small=300M, medium=1.5B, large=3.3B
+  duration: 30                        # seconds of music to generate
+  volume: 0.3                         # relative to voiceover (0.0 - 1.0)
+
+# --- Subtitles ---
+subtitles:
+  enabled: true
+  engine: "whisper"                   # "whisper" for word-level timestamps
+  model_size: "base"                  # tiny, base, small, medium, large
+  font: "Arial-Bold"
+  font_size: 48
+  color: "white"
+  stroke_color: "black"
+  stroke_width: 2
+  position: "bottom"                  # "bottom", "center", "top"
+  max_words_per_line: 5
+
+# --- Output Settings ---
+output:
+  directory: "output"
+  temp_directory: "temp"
+  format: "mp4"
+  codec: "libx264"
+  audio_codec: "aac"
+  # Presets for different platforms
+  presets:
+    youtube:
+      width: 1920
+      height: 1080
+      fps: 30
+      bitrate: "8M"
+    reels:
+      width: 1080
+      height: 1920
+      fps: 30
+      bitrate: "8M"
+    shorts:
+      width: 1080
+      height: 1920
+      fps: 30
+      bitrate: "8M"
+
+# --- Pipeline ---
+pipeline:
+  # Which stages to run (useful for debugging / partial runs)
+  stages:
+    - script_parse
+    - tts
+    - image_gen
+    - video_gen
+    - music_gen
+    - subtitles
+    - assemble
+  # VRAM management: unload each model after use
+  auto_unload_models: true
+  # Device
+  device: "cuda"                      # "cuda" or "cpu"
+  # Half precision (saves VRAM)
+  half_precision: true
