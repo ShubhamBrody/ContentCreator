@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import sys
 import threading
 import uuid
 from datetime import datetime
@@ -27,6 +29,19 @@ from fastapi.staticfiles import StaticFiles
 from src.config import Config
 from src.models.schemas import Platform
 from src.pipeline import Pipeline
+
+# =========================================================================
+# Logging — visible in uvicorn console
+# =========================================================================
+
+logger = logging.getLogger("contentcreator")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%H:%M:%S"
+    ))
+    logger.addHandler(handler)
 
 # =========================================================================
 # App & CORS
@@ -107,6 +122,8 @@ async def _run_pipeline_job(
 
     def _sync_run():
         """Execute pipeline in its own event loop (runs in a worker thread)."""
+        # Ensure prints from Rich/pipeline are flushed to console
+        sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -123,10 +140,13 @@ async def _pipeline_work(
 ) -> None:
     """The actual pipeline execution (runs inside the worker thread's loop)."""
     try:
+        logger.info("[%s] Pipeline starting — model=%s, platform=%s",
+                    job_id, config.llm.get('model'), params['platform'])
         jobs[job_id]["status"] = "running"
         pipeline = Pipeline(config)
 
         async def cb(stage: str, status: str, message: str = "") -> None:
+            logger.info("[%s] %s → %s  %s", job_id, stage, status, message)
             await _progress_callback(job_id, stage, status, message)
 
         result = await pipeline.run(
@@ -142,11 +162,13 @@ async def _pipeline_work(
         jobs[job_id]["progress"] = 100
         jobs[job_id]["message"] = "Video ready!"
         jobs[job_id]["video_path"] = result
+        logger.info("[%s] Pipeline COMPLETED — %s", job_id, result)
 
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["message"] = f"Failed: {str(e)}"
+        logger.error("[%s] Pipeline FAILED — %s", job_id, e, exc_info=True)
 
 
 # =========================================================================

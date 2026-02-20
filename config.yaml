@@ -8,7 +8,7 @@
 # --- LLM (Script Parsing & Scene Planning) ---
 llm:
   provider: "ollama"
-  model: "glm-4.7-flash:latest"      # or "llama3", "mistral"
+  model: "mistral:latest"              # 7.2B params, fits in RAM easily
   base_url: "http://localhost:11434"
   temperature: 0.7
   max_tokens: 4096
