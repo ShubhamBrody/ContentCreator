@@ -19,9 +19,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.character_designer import CharacterDesigner, CharacterProfile
 from src.config import Config
 from src.image_generator import ImageGenerator
-from src.models.schemas import ParsedScript, PipelineArtifacts, Platform
+from src.models.schemas import CharacterDef, ParsedScript, PipelineArtifacts, Platform
 from src.music_generator import MusicGenerator
 from src.script_parser import ScriptParser
 from src.subtitle_generator import SubtitleGenerator, SubtitleSegment
@@ -44,6 +45,7 @@ class Pipeline:
         self.music_generator = MusicGenerator(config)
         self.subtitle_generator = SubtitleGenerator(config)
         self.video_assembler = VideoAssembler(config)
+        self.character_designer = CharacterDesigner(config)
 
     async def run(
         self,
@@ -51,6 +53,8 @@ class Pipeline:
         platform: Platform = Platform.REELS,
         output_name: Optional[str] = None,
         num_scenes: Optional[int] = None,
+        characters: Optional[List[dict]] = None,
+        character_style: Optional[str] = None,
     ) -> str:
         """
         Run the full pipeline: script → final video.
@@ -60,6 +64,9 @@ class Pipeline:
             platform: Target platform (youtube, reels, shorts)
             output_name: Optional custom name for the output
             num_scenes: Optional override for number of scenes
+            characters: Optional list of character dicts with keys:
+                        name, description, photo_path (optional), traits (optional)
+            character_style: Sketch style (stick_figure, cartoon, manga, doodle, whiteboard)
 
         Returns:
             Path to the final video file
@@ -85,9 +92,9 @@ class Pipeline:
         # Stage 1: Parse Script
         # =================================================================
         if "script_parse" in stages:
-            console.print(Panel("[bold]Stage 1/7: Parsing Script[/bold]"))
+            console.print(Panel("[bold]Stage 1/8: Parsing Script[/bold]"))
             parsed_script = await self.script_parser.parse(
-                script, platform, num_scenes
+                script, platform, num_scenes, characters=characters
             )
             artifacts.parsed_script = parsed_script
 
@@ -101,11 +108,96 @@ class Pipeline:
             raise RuntimeError("script_parse stage is required.")
 
         # =================================================================
+        # Stage 1.5: Character Design (sketches from photos / descriptions)
+        # =================================================================
+        char_style = character_style or self.config.characters.get(
+            "default_style", "stick_figure"
+        )
+
+        if characters and "character_design" in stages:
+            console.print(Panel("[bold]Stage 1.5/8: Designing Characters[/bold]"))
+            sketch_dir = str(Path(temp_dir) / "characters")
+            os.makedirs(sketch_dir, exist_ok=True)
+
+            char_defs: List[CharacterDef] = []
+            sketch_paths: List[str] = []
+
+            for char_info in characters:
+                name = char_info.get("name", "character")
+                description = char_info.get("description", "")
+                photo_path = char_info.get("photo_path")
+                traits = char_info.get("traits", [])
+
+                sketch_filename = f"{name.lower().replace(' ', '_')}_sketch.png"
+                sketch_out = str(Path(sketch_dir) / sketch_filename)
+
+                if photo_path and os.path.isfile(photo_path):
+                    # Photo → sketch conversion
+                    console.print(
+                        f"  [cyan]Converting photo to sketch: {name}[/cyan]"
+                    )
+                    profile = self.character_designer.photo_to_sketch(
+                        photo_path=photo_path,
+                        output_path=sketch_out,
+                        character_name=name,
+                        style=char_style,
+                        description=description,
+                    )
+                else:
+                    # Description → sketch generation
+                    console.print(
+                        f"  [cyan]Generating sketch from description: {name}[/cyan]"
+                    )
+                    profile = self.character_designer.description_to_sketch(
+                        description=description,
+                        output_path=sketch_out,
+                        character_name=name,
+                        style=char_style,
+                    )
+
+                char_def = CharacterDef(
+                    name=name,
+                    description=description,
+                    photo_path=photo_path,
+                    sketch_path=profile.sketch_path,
+                    style=char_style,
+                    traits=traits,
+                )
+                char_defs.append(char_def)
+                if profile.sketch_path:
+                    sketch_paths.append(profile.sketch_path)
+
+            # Store character defs in parsed_script
+            artifacts.parsed_script.characters = char_defs  # type: ignore[union-attr]
+            artifacts.character_sketches = sketch_paths
+
+            # Pass character context to image generator
+            self.image_generator.set_character_context(char_defs, char_style)
+
+            console.print(
+                f"[green]✓ Created {len(sketch_paths)} character sketches[/green]"
+            )
+        elif characters:
+            # Characters defined but stage disabled — still pass style context
+            char_defs_basic = [
+                CharacterDef(
+                    name=c.get("name", "character"),
+                    description=c.get("description", ""),
+                    traits=c.get("traits", []),
+                    style=char_style,
+                )
+                for c in characters
+            ]
+            if artifacts.parsed_script:
+                artifacts.parsed_script.characters = char_defs_basic
+            self.image_generator.set_character_context(char_defs_basic, char_style)
+
+        # =================================================================
         # Stage 2: Text-to-Speech
         # =================================================================
         audio_files: List[str] = []
         if "tts" in stages:
-            console.print(Panel("[bold]Stage 2/7: Generating Voiceover[/bold]"))
+            console.print(Panel("[bold]Stage 2/8: Generating Voiceover[/bold]"))
             audio_dir = str(Path(temp_dir) / "audio")
             audio_files = await self.tts_engine.generate_scene_audio(
                 parsed_script, audio_dir
@@ -117,7 +209,7 @@ class Pipeline:
         # =================================================================
         image_files: List[str] = []
         if "image_gen" in stages:
-            console.print(Panel("[bold]Stage 3/7: Generating Images[/bold]"))
+            console.print(Panel("[bold]Stage 3/8: Generating Images[/bold]"))
             image_dir = str(Path(temp_dir) / "images")
             image_files = await self.image_generator.generate_scene_images(
                 parsed_script, image_dir
@@ -129,7 +221,7 @@ class Pipeline:
         # =================================================================
         video_files: List[str] = []
         if "video_gen" in stages:
-            console.print(Panel("[bold]Stage 4/7: Generating Video Clips[/bold]"))
+            console.print(Panel("[bold]Stage 4/8: Generating Video Clips[/bold]"))
             video_dir = str(Path(temp_dir) / "videos")
             video_files = await self.video_generator.generate_scene_videos(
                 parsed_script, video_dir
@@ -141,7 +233,7 @@ class Pipeline:
         # =================================================================
         music_path: Optional[str] = None
         if "music_gen" in stages:
-            console.print(Panel("[bold]Stage 5/7: Generating Music[/bold]"))
+            console.print(Panel("[bold]Stage 5/8: Generating Music[/bold]"))
             music_file = str(Path(temp_dir) / "background_music.wav")
             music_path = await self.music_generator.generate_music(
                 prompt=parsed_script.music_prompt,
@@ -156,7 +248,7 @@ class Pipeline:
         # =================================================================
         subtitles: Optional[List[List[SubtitleSegment]]] = None
         if "subtitles" in stages and audio_files:
-            console.print(Panel("[bold]Stage 6/7: Generating Subtitles[/bold]"))
+            console.print(Panel("[bold]Stage 6/8: Generating Subtitles[/bold]"))
             srt_dir = str(Path(temp_dir) / "subtitles")
             subtitles = await self.subtitle_generator.generate_subtitles(
                 audio_files, srt_dir
@@ -166,7 +258,7 @@ class Pipeline:
         # Stage 7: Assembly
         # =================================================================
         if "assemble" in stages:
-            console.print(Panel("[bold]Stage 7/7: Assembling Final Video[/bold]"))
+            console.print(Panel("[bold]Stage 7/8: Assembling Final Video[/bold]"))
             final_path = str(
                 Path(project_dir) / f"{project_name}.{self.config.output.get('format', 'mp4')}"
             )

@@ -36,6 +36,34 @@ class SceneTransition(str, Enum):
 
 
 # =============================================================================
+# Character Model
+# =============================================================================
+
+class CharacterDef(BaseModel):
+    """Definition of a character used across scenes."""
+
+    name: str = Field(..., description="Character name/identifier")
+    description: str = Field(
+        ...,
+        description="Visual description (e.g., 'tall man with glasses and a beard')"
+    )
+    photo_path: Optional[str] = Field(
+        default=None, description="Path to a real photo to convert to sketch"
+    )
+    sketch_path: Optional[str] = Field(
+        default=None, description="Path to generated sketch (populated by pipeline)"
+    )
+    style: str = Field(
+        default="stick_figure",
+        description="Sketch style: stick_figure, cartoon, manga, doodle, whiteboard"
+    )
+    traits: List[str] = Field(
+        default_factory=list,
+        description="Visual traits: ['wears red hat', 'has curly hair']"
+    )
+
+
+# =============================================================================
 # Scene Model — One segment of the video
 # =============================================================================
 
@@ -49,6 +77,18 @@ class Scene(BaseModel):
         ...,
         description="Detailed prompt for AI image generation "
                     "(visual description of what should appear)"
+    )
+    characters_in_scene: List[str] = Field(
+        default_factory=list,
+        description="Names of characters that appear in this scene"
+    )
+    character_actions: Optional[str] = Field(
+        default=None,
+        description="What the characters are doing (e.g., 'talking to each other', 'running')"
+    )
+    character_emotions: Optional[str] = Field(
+        default=None,
+        description="Character emotions/expressions (e.g., 'happy', 'surprised, angry')"
     )
     duration_seconds: float = Field(
         default=5.0,
@@ -79,6 +119,10 @@ class ParsedScript(BaseModel):
     title: str = Field(..., description="Video title")
     description: str = Field(default="", description="Short video description")
     platform: Platform = Field(default=Platform.REELS, description="Target platform")
+    characters: List[CharacterDef] = Field(
+        default_factory=list,
+        description="Characters appearing in the video"
+    )
     scenes: List[Scene] = Field(..., description="Ordered list of scenes")
     music_prompt: str = Field(
         default="background music",
@@ -103,6 +147,7 @@ class PipelineArtifacts(BaseModel):
 
     project_dir: str = Field(..., description="Root output directory for this run")
     parsed_script: Optional[ParsedScript] = None
+    character_sketches: List[str] = Field(default_factory=list, description="Paths to character sketch images")
     scene_audio_files: List[str] = Field(default_factory=list)
     scene_image_files: List[str] = Field(default_factory=list)
     scene_video_files: List[str] = Field(default_factory=list)

@@ -69,6 +69,18 @@ subtitles:
   position: "bottom"                  # "bottom", "center", "top"
   max_words_per_line: 5
 
+# --- Character Designer ---
+characters:
+  default_style: "stick_figure"       # stick_figure, cartoon, manga, doodle, whiteboard
+  controlnet_model: "diffusers/controlnet-canny-sdxl-1.0"
+  # Edge detection settings (for photo → sketch)
+  canny_low_threshold: 50
+  canny_high_threshold: 150
+  # Generation settings
+  num_inference_steps: 30
+  guidance_scale: 7.5
+  controlnet_conditioning_scale: 0.8
+
 # --- Output Settings ---
 output:
   directory: "output"
@@ -99,6 +111,7 @@ pipeline:
   # Which stages to run (useful for debugging / partial runs)
   stages:
     - script_parse
+    - character_design
     - tts
     - image_gen
     - video_gen

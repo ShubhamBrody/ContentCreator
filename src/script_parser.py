@@ -31,9 +31,12 @@ For EACH scene you must provide:
 2. title: Short scene title (2-5 words)
 3. narration: The voiceover text (what the narrator says)
 4. image_prompt: A detailed, vivid description for an AI image generator. Include style, composition, lighting, colors. Be specific and cinematic.
-5. duration_seconds: How long this scene should last (typically 3-8 seconds)
-6. transition: One of: "cut", "fade", "crossfade", "slide_left", "slide_right", "zoom_in"
-7. music_mood: The mood/energy for background music (e.g., "upbeat electronic", "calm piano", "dramatic orchestral")
+5. characters_in_scene: A list of character names that appear in this scene (use the exact names provided). Leave empty [] if no characters.
+6. character_actions: What the characters are doing in this scene (e.g., "talking to a friend", "running", "sitting at a desk"). null if no characters.
+7. character_emotions: The emotions/expressions of characters (e.g., "happy, excited", "sad, thoughtful"). null if no characters.
+8. duration_seconds: How long this scene should last (typically 3-8 seconds)
+9. transition: One of: "cut", "fade", "crossfade", "slide_left", "slide_right", "zoom_in"
+10. music_mood: The mood/energy for background music (e.g., "upbeat electronic", "calm piano", "dramatic orchestral")
 
 Also provide:
 - title: Overall video title
@@ -43,6 +46,7 @@ Also provide:
 RULES:
 - Keep narration natural and engaging
 - Image prompts should be highly detailed and visual (describe what the VIEWER sees)
+- When characters are provided, include them naturally in your image_prompt descriptions. Describe what they look like and what they are doing.
 - Each scene should be 3-8 seconds of narration
 - For short-form (reels/shorts): 5-10 scenes total, punchy and fast
 - For YouTube: 10-30 scenes, more detailed
@@ -59,6 +63,9 @@ Respond with this exact JSON structure:
       "title": "Scene Title",
       "narration": "What the narrator says...",
       "image_prompt": "Detailed visual description for AI image generation...",
+      "characters_in_scene": ["CharacterName"],
+      "character_actions": "what characters are doing",
+      "character_emotions": "happy, curious",
       "duration_seconds": 5.0,
       "transition": "fade",
       "music_mood": "upbeat"
@@ -86,6 +93,7 @@ class ScriptParser:
         script: str,
         platform: Platform = Platform.REELS,
         num_scenes: Optional[int] = None,
+        characters: Optional[list[dict[str, Any]]] = None,
     ) -> ParsedScript:
         """
         Parse a raw script/idea into structured scenes.
@@ -100,7 +108,7 @@ class ScriptParser:
         """
         console.print(Panel(f"[bold cyan]Parsing script with {self.model}[/bold cyan]"))
 
-        user_prompt = self._build_user_prompt(script, platform, num_scenes)
+        user_prompt = self._build_user_prompt(script, platform, num_scenes, characters)
 
         # Call Ollama API
         response_text = await self._call_ollama(user_prompt)
@@ -126,6 +134,7 @@ class ScriptParser:
         script: str,
         platform: Platform,
         num_scenes: Optional[int],
+        characters: Optional[list[dict[str, Any]]] = None,
     ) -> str:
         """Build the user prompt with context."""
         platform_guide = {
@@ -138,6 +147,21 @@ class ScriptParser:
 """
         if num_scenes:
             prompt += f"Number of scenes: exactly {num_scenes}\n"
+
+        # Inject character definitions so the LLM knows who to place in scenes
+        if characters:
+            prompt += "\nCharacters in this video:\n"
+            for char in characters:
+                name = char.get("name", "Unknown")
+                desc = char.get("description", "")
+                traits = char.get("traits", [])
+                traits_str = f" (Traits: {', '.join(traits)})" if traits else ""
+                prompt += f"- {name}: {desc}{traits_str}\n"
+            prompt += (
+                "\nWhen writing scenes, naturally include these characters "
+                "by adding their names to characters_in_scene, describe their "
+                "actions in character_actions, and their emotions in character_emotions.\n"
+            )
 
         prompt += f"""
 Script / Idea:

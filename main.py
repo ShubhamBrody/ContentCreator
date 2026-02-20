@@ -5,11 +5,13 @@ Usage:
     python main.py --script "Your video idea here" --platform reels
     python main.py --script-file script.txt --platform youtube
     python main.py --script "5 tips for productivity" --platform shorts --scenes 5
+    python main.py -s "A day in the life" -p reels --characters characters.json --character-style cartoon
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -60,6 +62,24 @@ console = Console()
     default=None,
     help="Path to custom config.yaml.",
 )
+@click.option(
+    "--characters",
+    type=str,
+    default=None,
+    help=(
+        "Characters as a JSON file path or inline JSON array. "
+        'Each object: {"name": "...", "description": "...", "photo_path": "...", "traits": [...]}'
+    ),
+)
+@click.option(
+    "--character-style",
+    type=click.Choice(
+        ["stick_figure", "cartoon", "manga", "doodle", "whiteboard"],
+        case_sensitive=False,
+    ),
+    default=None,
+    help="Sketch style for character illustrations.",
+)
 def main(
     script: str | None,
     script_file: str | None,
@@ -67,6 +87,8 @@ def main(
     output: str | None,
     scenes: int | None,
     config: str | None,
+    characters: str | None,
+    character_style: str | None,
 ) -> None:
     """
     ContentCreator - AI Video Generation Engine
@@ -81,6 +103,9 @@ def main(
         python main.py -f my_script.txt -p youtube -n 15
 
         python main.py -s "The history of AI in 60 seconds" -p shorts
+
+        python main.py -s "A day in the life of a cat" -p reels \\
+            --characters characters.json --character-style cartoon
     """
     # Resolve script text
     if script is None and script_file is None:
@@ -111,6 +136,29 @@ def main(
         console.print(f"[red]Config error: {e}[/red]")
         sys.exit(1)
 
+    # Parse characters (JSON file or inline JSON)
+    char_list = None
+    if characters:
+        char_path = Path(characters)
+        if char_path.is_file():
+            try:
+                char_list = json.loads(char_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                console.print(f"[red]Invalid characters JSON file: {e}[/red]")
+                sys.exit(1)
+        else:
+            try:
+                char_list = json.loads(characters)
+            except json.JSONDecodeError as e:
+                console.print(f"[red]Invalid characters JSON string: {e}[/red]")
+                sys.exit(1)
+
+        if not isinstance(char_list, list):
+            console.print("[red]Characters must be a JSON array of objects.[/red]")
+            sys.exit(1)
+
+        console.print(f"[cyan]Characters: {len(char_list)} defined[/cyan]")
+
     # Run pipeline
     pipeline = Pipeline(cfg)
 
@@ -121,6 +169,8 @@ def main(
                 platform=target_platform,
                 output_name=output,
                 num_scenes=scenes,
+                characters=char_list,
+                character_style=character_style,
             )
         )
         console.print(f"\n[bold green]Output: {result}[/bold green]")

@@ -34,3 +34,4 @@ pydantic>=2.0.0
 
 # Utilities
 tqdm>=4.65.0
+opencv-python>=4.8.0

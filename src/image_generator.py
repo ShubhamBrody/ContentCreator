@@ -17,7 +17,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.config import Config
 from src.gpu_utils import free_vram, log_vram, unload_model
-from src.models.schemas import ParsedScript, Platform
+from src.models.schemas import CharacterDef, ParsedScript, Platform
 
 console = Console()
 
@@ -40,8 +40,29 @@ class ImageGenerator:
             "negative_prompt",
             "blurry, low quality, distorted, deformed, ugly, bad anatomy",
         )
+        # Character sketch-style overrides
+        self._character_style: Optional[str] = None
+        self._characters: dict[str, CharacterDef] = {}
         self._pipe: Any = None
         self._refiner: Any = None
+
+    # -----------------------------------------------------------------
+    # Character integration
+    # -----------------------------------------------------------------
+
+    def set_character_context(
+        self,
+        characters: list[CharacterDef],
+        style: Optional[str] = None,
+    ) -> None:
+        """
+        Configure characters that may appear in scenes.
+
+        When a scene references characters, their visual descriptions and
+        the chosen sketch style will be injected into the image prompt.
+        """
+        self._characters = {c.name.lower(): c for c in characters}
+        self._character_style = style
 
     def _load_model(self) -> None:
         """Load SDXL pipeline onto GPU."""
@@ -162,8 +183,11 @@ class ImageGenerator:
                     ),
                 )
 
+                # Build character-aware prompt
+                prompt = self._build_scene_prompt(scene)
+
                 self._generate_single_image(
-                    prompt=scene.image_prompt,
+                    prompt=prompt,
                     output_path=filepath,
                     width=width,
                     height=height,
@@ -191,11 +215,8 @@ class ImageGenerator:
         if self._pipe is None:
             raise RuntimeError("SDXL model not loaded.")
 
-        # Enhance prompt for cinematic quality
-        enhanced_prompt = (
-            f"{prompt}, cinematic lighting, high quality, detailed, "
-            f"8k resolution, professional photography"
-        )
+        # Enhance prompt — use sketch style when characters are configured
+        enhanced_prompt = self._enhance_prompt(prompt)
 
         with torch.no_grad():
             if self.use_refiner and self._refiner is not None:
@@ -230,6 +251,82 @@ class ImageGenerator:
                 ).images[0]
 
         image.save(output_path)
+
+    # -----------------------------------------------------------------
+    # Prompt helpers
+    # -----------------------------------------------------------------
+
+    # Known sketch styles (mirrors character_designer.py SKETCH_STYLES)
+    SKETCH_STYLE_SUFFIXES: dict[str, str] = {
+        "stick_figure": (
+            "stick figure drawing, simple line art, black lines on white background, "
+            "minimalist, hand-drawn sketch, thin clean lines"
+        ),
+        "cartoon": (
+            "cartoon style illustration, bold outlines, flat colors, "
+            "comic book style, expressive, vibrant, animated look"
+        ),
+        "manga": (
+            "manga style illustration, Japanese comic art, screentone shading, "
+            "expressive eyes, dynamic poses, black and white ink"
+        ),
+        "doodle": (
+            "doodle art style, hand-drawn, casual sketch, pen drawing, "
+            "playful, loose lines, notebook doodle"
+        ),
+        "whiteboard": (
+            "whiteboard drawing, marker sketch, clean lines, simple shapes, "
+            "educational illustration, black marker on white"
+        ),
+    }
+
+    def _build_scene_prompt(self, scene: Any) -> str:
+        """
+        Build a complete image prompt for a scene, injecting character
+        descriptions and actions when characters are present.
+        """
+        parts: list[str] = [scene.image_prompt]
+
+        # Inject referenced character descriptions
+        char_names = getattr(scene, "characters_in_scene", [])
+        if char_names:
+            descs = []
+            for name in char_names:
+                cdef = self._characters.get(name.lower())
+                if cdef:
+                    traits = ", ".join(cdef.traits) if cdef.traits else ""
+                    desc_text = cdef.description
+                    if traits:
+                        desc_text += f" ({traits})"
+                    descs.append(f"{cdef.name}: {desc_text}")
+            if descs:
+                parts.append("Characters: " + "; ".join(descs))
+
+        # Inject character actions / emotions
+        actions = getattr(scene, "character_actions", None)
+        emotions = getattr(scene, "character_emotions", None)
+        if actions:
+            parts.append(f"Action: {actions}")
+        if emotions:
+            parts.append(f"Emotion: {emotions}")
+
+        return ", ".join(parts)
+
+    def _enhance_prompt(self, prompt: str) -> str:
+        """
+        Add quality / style suffix to a prompt.
+
+        If a character sketch style is active, use the sketch style suffix
+        instead of the default cinematic style.
+        """
+        if self._character_style and self._character_style in self.SKETCH_STYLE_SUFFIXES:
+            style_suffix = self.SKETCH_STYLE_SUFFIXES[self._character_style]
+            return f"{prompt}, {style_suffix}"
+
+        return (
+            f"{prompt}, cinematic lighting, high quality, detailed, "
+            f"8k resolution, professional photography"
+        )
 
     def generate_single(
         self,

@@ -59,6 +59,10 @@ class Config:
         return self._data.get("pipeline", {})
 
     @property
+    def characters(self) -> Dict[str, Any]:
+        return self._data.get("characters", {})
+
+    @property
     def device(self) -> str:
         return self._data.get("pipeline", {}).get("device", "cuda")
 
