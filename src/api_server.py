@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,19 @@ STAGES = [
     {"id": "assemble", "label": "Final Assembly", "icon": "Clapperboard"},
 ]
 
+# Rough ETA estimates (seconds) per stage — used as initial guess before
+# we have real timing data.  Updated with actual times after each run.
+STAGE_ETA_ESTIMATES: Dict[str, float] = {
+    "script_parse": 15,
+    "character_design": 60,
+    "tts": 20,
+    "image_gen": 90,
+    "video_gen": 180,
+    "music_gen": 45,
+    "subtitles": 20,
+    "assemble": 15,
+}
+
 
 def _init_job(job_id: str, active_stages: List[str]) -> Dict[str, Any]:
     return {
@@ -90,6 +104,22 @@ def _init_job(job_id: str, active_stages: List[str]) -> Dict[str, Any]:
         "video_path": None,
         "error": None,
         "created_at": datetime.now().isoformat(),
+        # --- ETA tracking ---
+        "stage_timings": {
+            s["id"]: {
+                "started_at": None,
+                "completed_at": None,
+                "elapsed": 0,
+                "eta": STAGE_ETA_ESTIMATES.get(s["id"], 30),
+            }
+            for s in STAGES
+            if s["id"] in active_stages
+        },
+        "total_elapsed": 0,
+        "total_eta": sum(
+            STAGE_ETA_ESTIMATES.get(s, 30) for s in active_stages
+        ),
+        "pipeline_started_at": None,
     }
 
 
@@ -105,6 +135,31 @@ async def _progress_callback(
     if message:
         job["message"] = message
 
+    now = time.time()
+    timings = job.get("stage_timings", {})
+
+    # Update timing data
+    if stage in timings:
+        st = timings[stage]
+        if status == "running" and st["started_at"] is None:
+            st["started_at"] = now
+        elif status == "completed":
+            st["completed_at"] = now
+            if st["started_at"] is not None:
+                actual = now - st["started_at"]
+                st["elapsed"] = round(actual, 1)
+                st["eta"] = 0
+                # Update global estimate for this stage type
+                STAGE_ETA_ESTIMATES[stage] = round(actual, 1)
+
+    # Refresh elapsed for all running stages
+    for sid, st in timings.items():
+        if st["started_at"] is not None and st["completed_at"] is None:
+            st["elapsed"] = round(now - st["started_at"], 1)
+            original_eta = STAGE_ETA_ESTIMATES.get(sid, 30)
+            remaining = max(0, original_eta - st["elapsed"])
+            st["eta"] = round(remaining, 1)
+
     # Calculate overall progress
     active = job["active_stages"]
     completed = sum(1 for s in active if job["stages"].get(s) == "completed")
@@ -113,6 +168,17 @@ async def _progress_callback(
     # A running stage counts as half done
     job["progress"] = round(((completed + running * 0.5) / max(total, 1)) * 100, 1)
     job["status"] = "running"
+
+    # Total elapsed and total ETA
+    if job["pipeline_started_at"] is not None:
+        job["total_elapsed"] = round(now - job["pipeline_started_at"], 1)
+    done_time = sum(
+        st["elapsed"] for st in timings.values() if st["completed_at"] is not None
+    )
+    remaining_est = sum(
+        st["eta"] for st in timings.values() if st["completed_at"] is None
+    )
+    job["total_eta"] = round(remaining_est, 1)
 
 
 async def _run_pipeline_job(
@@ -143,6 +209,7 @@ async def _pipeline_work(
         logger.info("[%s] Pipeline starting — model=%s, platform=%s",
                     job_id, config.llm.get('model'), params['platform'])
         jobs[job_id]["status"] = "running"
+        jobs[job_id]["pipeline_started_at"] = time.time()
         pipeline = Pipeline(config)
 
         async def cb(stage: str, status: str, message: str = "") -> None:

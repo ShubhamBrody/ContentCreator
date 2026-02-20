@@ -2,13 +2,16 @@
 ContentCreator - Pipeline Orchestrator
 
 Orchestrates the full video creation pipeline:
-  Script → Parse → TTS → Images → Video → Music → Subtitles → Assemble
+  Script → Parse → [TTS ‖ Images] → Video → Music → Subtitles → Assemble
 
-Manages VRAM by loading/unloading models sequentially.
+Runs TTS and Image generation concurrently (TTS = network I/O,
+Images = GPU, no resource conflict). Manages VRAM by loading/unloading
+models sequentially for GPU-heavy stages.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from datetime import datetime
@@ -204,10 +207,69 @@ class Pipeline:
             self.image_generator.set_character_context(char_defs_basic, char_style)
 
         # =================================================================
-        # Stage 2: Text-to-Speech
+        # Stages 2+3: TTS ‖ Image Generation (concurrent)
+        # TTS uses network/CPU (edge-tts), Image Gen uses GPU (SDXL).
+        # Running in parallel saves significant wall-clock time.
         # =================================================================
         audio_files: List[str] = []
-        if "tts" in stages:
+        image_files: List[str] = []
+
+        tts_needed = "tts" in stages
+        image_gen_needed = "image_gen" in stages
+
+        if tts_needed and image_gen_needed:
+            console.print(
+                Panel("[bold]Stages 2-3/8: Voice + Images (parallel)[/bold]")
+            )
+            audio_dir = str(Path(temp_dir) / "audio")
+            image_dir = str(Path(temp_dir) / "images")
+
+            await _report("tts", "running", "Generating voiceover audio...")
+            await _report("image_gen", "running", "Generating scene images with SDXL...")
+
+            # TTS is truly async (network I/O) — runs in current event loop
+            async def _do_tts() -> List[str]:
+                result = await self.tts_engine.generate_scene_audio(
+                    parsed_script, audio_dir
+                )
+                await _report(
+                    "tts", "completed", f"Generated {len(result)} audio files"
+                )
+                return result
+
+            # Image gen does blocking GPU work — run in a thread so TTS
+            # can proceed concurrently on the event loop.
+            def _do_images_sync() -> List[str]:
+                _loop = asyncio.new_event_loop()
+                try:
+                    return _loop.run_until_complete(
+                        self.image_generator.generate_scene_images(
+                            parsed_script, image_dir
+                        )
+                    )
+                finally:
+                    _loop.close()
+
+            loop = asyncio.get_event_loop()
+            tts_task = asyncio.ensure_future(_do_tts())
+            image_future = loop.run_in_executor(None, _do_images_sync)
+
+            audio_files, image_files = await asyncio.gather(
+                tts_task, image_future
+            )
+
+            artifacts.scene_audio_files = audio_files
+            artifacts.scene_image_files = image_files
+            await _report(
+                "image_gen", "completed",
+                f"Generated {len(image_files)} images",
+            )
+            console.print(
+                f"[green]✓ Parallel complete — "
+                f"{len(audio_files)} audio, {len(image_files)} images[/green]"
+            )
+
+        elif tts_needed:
             console.print(Panel("[bold]Stage 2/8: Generating Voiceover[/bold]"))
             await _report("tts", "running", "Generating voiceover audio...")
             audio_dir = str(Path(temp_dir) / "audio")
@@ -215,35 +277,47 @@ class Pipeline:
                 parsed_script, audio_dir
             )
             artifacts.scene_audio_files = audio_files
-            await _report("tts", "completed", f"Generated {len(audio_files)} audio files")
+            await _report(
+                "tts", "completed", f"Generated {len(audio_files)} audio files"
+            )
 
-        # =================================================================
-        # Stage 3: Image Generation
-        # =================================================================
-        image_files: List[str] = []
-        if "image_gen" in stages:
+        elif image_gen_needed:
             console.print(Panel("[bold]Stage 3/8: Generating Images[/bold]"))
-            await _report("image_gen", "running", "Generating scene images with SDXL...")
+            await _report(
+                "image_gen", "running", "Generating scene images with SDXL..."
+            )
             image_dir = str(Path(temp_dir) / "images")
             image_files = await self.image_generator.generate_scene_images(
                 parsed_script, image_dir
             )
             artifacts.scene_image_files = image_files
-            await _report("image_gen", "completed", f"Generated {len(image_files)} images")
+            await _report(
+                "image_gen", "completed",
+                f"Generated {len(image_files)} images",
+            )
 
         # =================================================================
         # Stage 4: Video Generation
         # =================================================================
         video_files: List[str] = []
         if "video_gen" in stages:
-            console.print(Panel("[bold]Stage 4/8: Generating Video Clips[/bold]"))
-            await _report("video_gen", "running", "Generating video clips...")
+            engine = self.config.video.get("engine", "image_motion")
+            console.print(
+                Panel(f"[bold]Stage 4/8: Generating Video Clips [{engine}][/bold]")
+            )
+            await _report(
+                "video_gen", "running",
+                f"Generating video clips with {engine}...",
+            )
             video_dir = str(Path(temp_dir) / "videos")
             video_files = await self.video_generator.generate_scene_videos(
                 parsed_script, video_dir
             )
             artifacts.scene_video_files = video_files
-            await _report("video_gen", "completed", f"Generated {len(video_files)} video clips")
+            await _report(
+                "video_gen", "completed",
+                f"Generated {len(video_files)} video clips",
+            )
 
         # =================================================================
         # Stage 5: Music Generation

@@ -30,6 +30,9 @@ export default function App() {
             stages={pipeline.stages}
             progress={pipeline.progress}
             message={pipeline.message}
+            stageTimings={pipeline.stageTimings}
+            totalElapsed={pipeline.totalElapsed}
+            totalEta={pipeline.totalEta}
           />
         )}
 

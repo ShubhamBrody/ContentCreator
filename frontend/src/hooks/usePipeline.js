@@ -19,6 +19,9 @@ export default function usePipeline() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [stageTimings, setStageTimings] = useState({})
+  const [totalElapsed, setTotalElapsed] = useState(0)
+  const [totalEta, setTotalEta] = useState(0)
   const eventSourceRef = useRef(null)
 
   const generate = useCallback(async (formData) => {
@@ -51,6 +54,9 @@ export default function usePipeline() {
           setStages(data.stages || {})
           setProgress(data.progress || 0)
           setMessage(data.message || '')
+          setStageTimings(data.stage_timings || {})
+          setTotalElapsed(data.total_elapsed || 0)
+          setTotalEta(data.total_eta || 0)
 
           if (data.status === 'completed') {
             setView('result')
@@ -94,6 +100,9 @@ export default function usePipeline() {
     setMessage('')
     setError(null)
     setIsSubmitting(false)
+    setStageTimings({})
+    setTotalElapsed(0)
+    setTotalEta(0)
   }, [])
 
   return {
@@ -104,6 +113,9 @@ export default function usePipeline() {
     message,
     error,
     isSubmitting,
+    stageTimings,
+    totalElapsed,
+    totalEta,
     generate,
     reset,
   }

@@ -2,7 +2,7 @@ import {
   FileText, Palette, Mic, Image, Film,
   Music, MessageSquare, Clapperboard,
   Check, Loader2, Circle, SkipForward,
-  AlertTriangle,
+  AlertTriangle, Clock,
 } from 'lucide-react'
 
 const STAGE_META = {
@@ -21,6 +21,16 @@ const STAGE_ORDER = [
   'video_gen', 'music_gen', 'subtitles', 'assemble',
 ]
 
+/** Format seconds into human-readable string like "1m 23s" or "45s" */
+function formatTime(seconds) {
+  if (!seconds || seconds <= 0) return null
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  return rem > 0 ? `${m}m ${rem}s` : `${m}m`
+}
+
 function StatusIcon({ status }) {
   if (status === 'completed') return <Check className="w-4 h-4 text-emerald-400" />
   if (status === 'running')   return <Loader2 className="w-4 h-4 text-neon-cyan animate-spin" />
@@ -29,7 +39,46 @@ function StatusIcon({ status }) {
   return <Circle className="w-3 h-3 text-slate-600" />
 }
 
-export default function ProgressScreen({ stages, progress, message }) {
+/** Per-stage timing badge */
+function TimingBadge({ status, timing }) {
+  if (!timing) return null
+
+  const elapsed = formatTime(timing.elapsed)
+  const eta = formatTime(timing.eta)
+
+  if (status === 'completed' && elapsed) {
+    return (
+      <span className="text-[10px] font-mono text-emerald-400/70 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+        {elapsed}
+      </span>
+    )
+  }
+
+  if (status === 'running') {
+    return (
+      <span className="flex items-center gap-1 text-[10px] font-mono text-neon-cyan/70 bg-neon-cyan/[0.06] px-1.5 py-0.5 rounded">
+        <Clock className="w-2.5 h-2.5" />
+        {elapsed || '0s'}
+        {eta ? <span className="text-slate-500 ml-0.5">/ ~{eta}</span> : null}
+      </span>
+    )
+  }
+
+  // Pending — show estimate
+  if (eta) {
+    return (
+      <span className="text-[10px] font-mono text-slate-600 px-1.5 py-0.5">
+        ~{eta}
+      </span>
+    )
+  }
+
+  return null
+}
+
+export default function ProgressScreen({
+  stages, progress, message, stageTimings, totalElapsed, totalEta,
+}) {
   return (
     <div className="mt-16 sm:mt-24 flex flex-col items-center animate-fade-in">
       {/* Title */}
@@ -47,6 +96,7 @@ export default function ProgressScreen({ stages, progress, message }) {
             if (status === 'skipped') return null
             const meta = STAGE_META[stageId] || { label: stageId, Icon: Circle }
             const { Icon } = meta
+            const timing = stageTimings?.[stageId]
 
             return (
               <div
@@ -79,6 +129,9 @@ export default function ProgressScreen({ stages, progress, message }) {
                   {meta.label}
                 </span>
 
+                {/* Timing badge */}
+                <TimingBadge status={status} timing={timing} />
+
                 {/* Status */}
                 <StatusIcon status={status} />
               </div>
@@ -91,7 +144,15 @@ export default function ProgressScreen({ stages, progress, message }) {
       <div className="w-full max-w-lg mt-8">
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs text-slate-500">Overall Progress</span>
-          <span className="text-xs font-mono text-neon-cyan">{Math.round(progress)}%</span>
+          <div className="flex items-center gap-3">
+            {totalElapsed > 0 && (
+              <span className="text-[10px] font-mono text-slate-500">
+                {formatTime(totalElapsed)}
+                {totalEta > 0 ? ` / ~${formatTime(totalElapsed + totalEta)} total` : ''}
+              </span>
+            )}
+            <span className="text-xs font-mono text-neon-cyan">{Math.round(progress)}%</span>
+          </div>
         </div>
         <div className="w-full h-2 rounded-full bg-white/5 overflow-hidden">
           <div

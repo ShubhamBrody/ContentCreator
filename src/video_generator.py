@@ -1,9 +1,10 @@
 """
 ContentCreator - Video Generator
 
-Converts scene images into video clips. Supports:
-  1. Stable Video Diffusion (AI-generated motion, GPU required, ~12GB VRAM)
-  2. Image Motion (Ken Burns zoom/pan effect, CPU-friendly fallback)
+Converts scene images / prompts into video clips. Supports:
+  1. AnimateDiff  (AI text-to-video, 24fps smooth motion, ~8-10 GB VRAM)
+  2. Stable Video Diffusion  (AI image-to-video, ~12 GB VRAM)
+  3. Image Motion  (Ken Burns zoom/pan, CPU-friendly fallback)
 """
 
 from __future__ import annotations
@@ -27,11 +28,13 @@ console = Console()
 
 
 class VideoGenerator:
-    """Generates video clips from scene images."""
+    """Generates video clips from scene images or prompts."""
 
     def __init__(self, config: Config):
         self.config = config
         self.engine = config.video.get("engine", "image_motion")
+
+        # --- SVD settings ---
         self.model_id = config.video.get(
             "model", "stabilityai/stable-video-diffusion-img2vid-xt"
         )
@@ -41,17 +44,80 @@ class VideoGenerator:
         self.noise_aug_strength = config.video.get("noise_aug_strength", 0.02)
         self.decode_chunk_size = config.video.get("decode_chunk_size", 8)
 
-        # Image motion config (fallback)
+        # --- AnimateDiff settings ---
+        ad_config = config.video.get("animatediff", {})
+        self.ad_base_model = ad_config.get(
+            "base_model", "SG161222/Realistic_Vision_V5.1_noVAE"
+        )
+        self.ad_motion_adapter = ad_config.get(
+            "motion_adapter", "guanzhi/animatediff-motion-adapter-v1-5-3"
+        )
+        self.ad_num_frames = ad_config.get("num_frames", 16)
+        self.ad_fps = ad_config.get("fps", 24)
+        self.ad_guidance_scale = ad_config.get("guidance_scale", 7.5)
+        self.ad_num_inference_steps = ad_config.get("num_inference_steps", 25)
+        self.ad_width = ad_config.get("width", 512)
+        self.ad_height = ad_config.get("height", 768)
+
+        # --- Image motion config (fallback) ---
         im_config = config.video.get("image_motion", {})
         self.zoom_range: list[float] = im_config.get("zoom_range", [1.0, 1.15])
         self.pan_range: list[float] = im_config.get("pan_range", [-0.05, 0.05])
         self.duration_per_scene: float = im_config.get("duration_per_scene", 5)
 
         self._pipe: Any = None
+        self._motion_adapter: Any = None
 
     # =========================================================================
     # Model management
     # =========================================================================
+
+    def _load_animatediff(self) -> None:
+        """Load AnimateDiff pipeline (SD 1.5 base + motion adapter)."""
+        if self._pipe is not None:
+            return
+
+        console.print("[cyan]Loading AnimateDiff motion adapter...[/cyan]")
+        log_vram("before AnimateDiff load")
+
+        from diffusers import AnimateDiffPipeline, MotionAdapter, DDIMScheduler
+
+        dtype = torch.float16 if self.config.half_precision else torch.float32
+
+        # 1. Load motion adapter weights
+        self._motion_adapter = MotionAdapter.from_pretrained(
+            self.ad_motion_adapter, torch_dtype=dtype
+        )
+
+        # 2. Build pipeline with SD 1.5 base + adapter
+        console.print(f"[cyan]Loading base model: {self.ad_base_model}[/cyan]")
+        self._pipe = AnimateDiffPipeline.from_pretrained(
+            self.ad_base_model,
+            motion_adapter=self._motion_adapter,
+            torch_dtype=dtype,
+        )
+
+        # 3. Configure scheduler for stable generation
+        self._pipe.scheduler = DDIMScheduler.from_pretrained(
+            self.ad_base_model,
+            subfolder="scheduler",
+            clip_sample=False,
+            timestep_spacing="linspace",
+            beta_schedule="linear",
+            steps_offset=1,
+        )
+
+        # 4. VRAM optimizations
+        self._pipe.enable_vae_slicing()
+        self._pipe.enable_vae_tiling()
+        try:
+            self._pipe.enable_model_cpu_offload()
+            console.print("[dim]Using CPU offloading for AnimateDiff[/dim]")
+        except Exception:
+            self._pipe.to(self.config.device)
+
+        log_vram("after AnimateDiff load")
+        console.print("[green]✓ AnimateDiff model loaded[/green]")
 
     def _load_svd(self) -> None:
         """Load Stable Video Diffusion pipeline."""
@@ -85,11 +151,14 @@ class VideoGenerator:
     def unload(self) -> None:
         """Unload video model and free VRAM."""
         if self._pipe is not None:
-            console.print("[dim]Unloading SVD model...[/dim]")
+            console.print("[dim]Unloading video model...[/dim]")
             unload_model(self._pipe)
             self._pipe = None
-            free_vram()
-            log_vram("after SVD unload")
+        if self._motion_adapter is not None:
+            unload_model(self._motion_adapter)
+            self._motion_adapter = None
+        free_vram()
+        log_vram("after video model unload")
 
     # =========================================================================
     # Public API
@@ -104,7 +173,7 @@ class VideoGenerator:
         Generate video clips for each scene.
 
         Args:
-            parsed_script: Parsed script (scenes must have image_path set)
+            parsed_script: Parsed script with scenes
             output_dir: Directory to save video clips
 
         Returns:
@@ -113,8 +182,10 @@ class VideoGenerator:
         os.makedirs(output_dir, exist_ok=True)
         video_files: List[str] = []
 
-        # Choose engine
-        if self.engine == "svd":
+        # Choose engine and load model
+        if self.engine == "animatediff":
+            self._load_animatediff()
+        elif self.engine == "svd":
             self._load_svd()
 
         with Progress(
@@ -139,17 +210,27 @@ class VideoGenerator:
                     ),
                 )
 
-                if scene.image_path is None:
-                    raise ValueError(
-                        f"Scene {scene.scene_number} has no image. "
-                        "Run image generation first."
-                    )
-
                 duration = scene.duration_seconds
 
-                if self.engine == "svd":
+                if self.engine == "animatediff":
+                    # AnimateDiff: text → animated video
+                    prompt = getattr(scene, "image_prompt", None) or scene.narration
+                    self._generate_animatediff_clip(prompt, filepath, duration)
+                elif self.engine == "svd":
+                    # SVD: image → video (requires image_path)
+                    if scene.image_path is None:
+                        raise ValueError(
+                            f"Scene {scene.scene_number} has no image. "
+                            "Run image generation first."
+                        )
                     self._generate_svd_clip(scene.image_path, filepath)
                 else:
+                    # Ken Burns fallback
+                    if scene.image_path is None:
+                        raise ValueError(
+                            f"Scene {scene.scene_number} has no image. "
+                            "Run image generation first."
+                        )
                     self._generate_motion_clip(
                         scene.image_path, filepath, duration
                     )
@@ -160,13 +241,58 @@ class VideoGenerator:
 
         console.print(f"[green]✓ Generated {len(video_files)} video clips[/green]")
 
-        if self.engine == "svd" and self.config.auto_unload:
+        if self.engine in ("svd", "animatediff") and self.config.auto_unload:
             self.unload()
 
         return video_files
 
     # =========================================================================
-    # SVD — AI-generated motion
+    # AnimateDiff — AI text-to-animated-video (24fps smooth motion)
+    # =========================================================================
+
+    def _generate_animatediff_clip(
+        self,
+        prompt: str,
+        output_path: str,
+        target_duration: float,
+    ) -> None:
+        """Generate an animated video clip from a text prompt using AnimateDiff."""
+        if self._pipe is None:
+            raise RuntimeError("AnimateDiff model not loaded.")
+
+        # Enhance the prompt for cinematic motion
+        enhanced_prompt = (
+            f"{prompt}, cinematic, smooth camera motion, "
+            "high quality, detailed, 4k, professional lighting"
+        )
+        negative_prompt = (
+            "blurry, low quality, distorted, deformed, ugly, bad anatomy, "
+            "static, frozen, jittery, noise, watermark, text"
+        )
+
+        console.print(f"[dim]AnimateDiff: {self.ad_num_frames} frames "
+                       f"@ {self.ad_width}x{self.ad_height}[/dim]")
+
+        with torch.no_grad():
+            output = self._pipe(
+                prompt=enhanced_prompt,
+                negative_prompt=negative_prompt,
+                num_frames=self.ad_num_frames,
+                width=self.ad_width,
+                height=self.ad_height,
+                guidance_scale=self.ad_guidance_scale,
+                num_inference_steps=self.ad_num_inference_steps,
+            )
+            frames = output.frames[0]
+
+        # Calculate fps so the raw clip length ≈ target_duration
+        # AnimateDiff gives us ad_num_frames frames.
+        # E.g. 16 frames / 5s ≈ 3.2 fps is too slow. We write at ad_fps and
+        # let the assembler loop / trim to match scene duration.
+        self._frames_to_video(frames, output_path, self.ad_fps)
+
+    # =========================================================================
+    # SVD — AI-generated motion from image
     # =========================================================================
 
     def _generate_svd_clip(self, image_path: str, output_path: str) -> None:

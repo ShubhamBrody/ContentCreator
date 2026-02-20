@@ -36,14 +36,25 @@ image:
 
 # --- Video Generation ---
 video:
-  engine: "svd"                       # "svd" (Stable Video Diffusion) or "animatediff" or "image_motion"
+  engine: "animatediff"               # "animatediff" (24fps AI motion) | "svd" | "image_motion"
+  # --- AnimateDiff (primary — text-to-animated-video, ~8-10 GB VRAM) ---
+  animatediff:
+    base_model: "SG161222/Realistic_Vision_V5.1_noVAE"   # SD 1.5 checkpoint
+    motion_adapter: "guanzhi/animatediff-motion-adapter-v1-5-3"
+    num_frames: 16                    # frames per clip (16-32; higher = more VRAM)
+    fps: 24                           # output frame rate
+    guidance_scale: 7.5
+    num_inference_steps: 25
+    width: 512                        # generation width  (keep ≤768 for 16 GB VRAM)
+    height: 768                       # generation height (portrait for reels)
+  # --- SVD (alternative — image-to-video, ~12 GB VRAM) ---
   model: "stabilityai/stable-video-diffusion-img2vid-xt"
   num_frames: 25                      # ~3 seconds at 8fps
   fps: 8
   motion_bucket_id: 127              # Higher = more motion
   noise_aug_strength: 0.02
   decode_chunk_size: 8
-  # Fallback: image_motion uses Ken Burns effect (no GPU needed for this stage)
+  # --- Ken Burns fallback (CPU-only, no AI motion) ---
   image_motion:
     zoom_range: [1.0, 1.15]
     pan_range: [-0.05, 0.05]
@@ -93,17 +104,17 @@ output:
     youtube:
       width: 1920
       height: 1080
-      fps: 30
+      fps: 24
       bitrate: "8M"
     reels:
       width: 1080
       height: 1920
-      fps: 30
+      fps: 24
       bitrate: "8M"
     shorts:
       width: 1080
       height: 1920
-      fps: 30
+      fps: 24
       bitrate: "8M"
 
 # --- Pipeline ---
