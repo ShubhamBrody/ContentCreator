@@ -11,7 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # =============================================================================
@@ -102,6 +102,25 @@ class Scene(BaseModel):
         default=None,
         description="Music mood/style for this scene (e.g., 'upbeat', 'dramatic')"
     )
+
+    # --- Validators: handle common LLM output variations ---
+
+    @field_validator("character_actions", "character_emotions", mode="before")
+    @classmethod
+    def _coerce_to_string(cls, v):
+        """LLMs sometimes return a list instead of a string."""
+        if isinstance(v, list):
+            return ", ".join(str(i) for i in v)
+        return v
+
+    @field_validator("transition", mode="before")
+    @classmethod
+    def _normalize_transition(cls, v):
+        """Fall back to 'fade' if the LLM returns an unsupported transition."""
+        valid = {e.value for e in SceneTransition}
+        if isinstance(v, str) and v.lower().strip() not in valid:
+            return SceneTransition.FADE.value
+        return v
 
     # --- Paths populated during pipeline ---
     audio_path: Optional[str] = Field(default=None, description="Path to generated TTS audio")
