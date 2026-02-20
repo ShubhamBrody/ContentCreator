@@ -2,7 +2,9 @@
 ContentCreator - Text-to-Speech Engine
 
 Generates voiceover audio from scene narration text.
-Supports Coqui XTTS v2 (local, free, GPU-accelerated).
+Supports:
+  - edge-tts: Microsoft Edge TTS (free, high quality, many voices, no GPU needed)
+  - coqui: Coqui XTTS v2 (local, GPU, voice cloning — requires Python <3.12)
 """
 
 from __future__ import annotations
@@ -15,54 +17,38 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.config import Config
-from src.gpu_utils import free_vram, log_vram, unload_model
 from src.models.schemas import ParsedScript
 
 console = Console()
 
 
+# =============================================================================
+# Default voice map for edge-tts
+# =============================================================================
+EDGE_VOICES = {
+    "en-male": "en-US-GuyNeural",
+    "en-female": "en-US-JennyNeural",
+    "en-narrator": "en-US-DavisNeural",
+    "en-cheerful": "en-US-AriaNeural",
+    "en-british-male": "en-GB-RyanNeural",
+    "en-british-female": "en-GB-SoniaNeural",
+    "en-australian-female": "en-AU-NatashaNeural",
+    "hi-male": "hi-IN-MadhurNeural",
+    "hi-female": "hi-IN-SwaraNeural",
+}
+
+
 class TTSEngine:
-    """Text-to-Speech engine using Coqui XTTS v2."""
+    """Text-to-Speech engine using Microsoft Edge TTS (free, high quality)."""
 
     def __init__(self, config: Config):
         self.config = config
-        self.engine = config.tts.get("engine", "coqui")
-        self.model_name = config.tts.get(
-            "model", "tts_models/multilingual/multi-dataset/xtts_v2"
-        )
+        self.engine = config.tts.get("engine", "edge")
         self.language = config.tts.get("language", "en")
-        self.speaker_wav = config.tts.get("speaker_wav")
-        self.speed = config.tts.get("speed", 1.0)
-        self._tts_model = None
-
-    def _load_model(self) -> None:
-        """Load the TTS model onto GPU."""
-        if self._tts_model is not None:
-            return
-
-        console.print("[cyan]Loading TTS model (Coqui XTTS v2)...[/cyan]")
-        log_vram("before TTS load")
-
-        from TTS.api import TTS  # type: ignore[import-untyped]
-
-        self._tts_model = TTS(model_name=self.model_name)
-
-        # Move to GPU if available
-        device = self.config.device
-        if device == "cuda":
-            self._tts_model = self._tts_model.to(device)
-
-        log_vram("after TTS load")
-        console.print("[green]✓ TTS model loaded[/green]")
-
-    def unload(self) -> None:
-        """Unload the TTS model and free VRAM."""
-        if self._tts_model is not None:
-            console.print("[dim]Unloading TTS model...[/dim]")
-            unload_model(self._tts_model)
-            self._tts_model = None
-            free_vram()
-            log_vram("after TTS unload")
+        self.voice = config.tts.get("voice", "en-US-GuyNeural")
+        self.rate = config.tts.get("rate", "+0%")
+        self.volume = config.tts.get("volume", "+0%")
+        self.pitch = config.tts.get("pitch", "+0Hz")
 
     async def generate_scene_audio(
         self,
@@ -79,9 +65,7 @@ class TTSEngine:
         Returns:
             List of paths to generated audio files
         """
-        self._load_model()
         os.makedirs(output_dir, exist_ok=True)
-
         audio_files: List[str] = []
 
         with Progress(
@@ -95,7 +79,7 @@ class TTSEngine:
             )
 
             for scene in parsed_script.scenes:
-                filename = f"scene_{scene.scene_number:03d}_audio.wav"
+                filename = f"scene_{scene.scene_number:03d}_audio.mp3"
                 filepath = str(Path(output_dir) / filename)
 
                 progress.update(
@@ -103,48 +87,33 @@ class TTSEngine:
                     description=f"TTS: Scene {scene.scene_number}/{parsed_script.scene_count}",
                 )
 
-                self._synthesize(scene.narration, filepath)
+                await self._synthesize(scene.narration, filepath)
                 audio_files.append(filepath)
                 scene.audio_path = filepath
 
                 progress.advance(task)
 
         console.print(f"[green]✓ Generated {len(audio_files)} audio files[/green]")
-
-        # Unload if configured
-        if self.config.auto_unload:
-            self.unload()
-
         return audio_files
 
-    def _synthesize(self, text: str, output_path: str) -> None:
-        """Synthesize a single text to audio file."""
-        if self._tts_model is None:
-            raise RuntimeError("TTS model not loaded. Call _load_model() first.")
+    async def _synthesize(self, text: str, output_path: str) -> None:
+        """Synthesize text to audio using edge-tts."""
+        import edge_tts
 
-        if self.speaker_wav and os.path.exists(self.speaker_wav):
-            # Voice cloning mode
-            self._tts_model.tts_to_file(
-                text=text,
-                file_path=output_path,
-                speaker_wav=self.speaker_wav,
-                language=self.language,
-                speed=self.speed,
-            )
-        else:
-            # Default speaker
-            self._tts_model.tts_to_file(
-                text=text,
-                file_path=output_path,
-                language=self.language,
-                speed=self.speed,
-            )
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=self.voice,
+            rate=self.rate,
+            volume=self.volume,
+            pitch=self.pitch,
+        )
+        await communicate.save(output_path)
 
-    def generate_single(
+    async def generate_single(
         self,
         text: str,
         output_path: str,
-        speaker_wav: Optional[str] = None,
+        voice: Optional[str] = None,
     ) -> str:
         """
         Generate audio for a single text (utility method).
@@ -152,19 +121,33 @@ class TTSEngine:
         Args:
             text: Text to synthesize
             output_path: Where to save the audio
-            speaker_wav: Optional reference audio for voice cloning
+            voice: Optional voice override
 
         Returns:
             Path to generated audio file
         """
-        self._load_model()
+        import edge_tts
 
-        if speaker_wav:
-            self.speaker_wav = speaker_wav
-
-        self._synthesize(text, output_path)
-
-        if self.config.auto_unload:
-            self.unload()
-
+        v = voice or self.voice
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=v,
+            rate=self.rate,
+            volume=self.volume,
+            pitch=self.pitch,
+        )
+        await communicate.save(output_path)
         return output_path
+
+    @staticmethod
+    async def list_voices(language: str = "en") -> List[str]:
+        """List available voices for a language."""
+        import edge_tts
+
+        voices = await edge_tts.list_voices()
+        filtered = [
+            f"{v['ShortName']} ({v['Gender']}) - {v['Locale']}"
+            for v in voices
+            if v.get("Locale", "").startswith(language)
+        ]
+        return filtered

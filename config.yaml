@@ -15,11 +15,12 @@ llm:
 
 # --- Text-to-Speech ---
 tts:
-  engine: "coqui"                     # "coqui" (XTTS v2) or "piper"
-  model: "tts_models/multilingual/multi-dataset/xtts_v2"
+  engine: "edge"                      # "edge" (Microsoft Edge TTS, free, high quality)
   language: "en"
-  speaker_wav: null                   # Path to reference audio for voice cloning
-  speed: 1.0
+  voice: "en-US-GuyNeural"            # See available voices: python -c "import asyncio; from src.tts_engine import TTSEngine; print(asyncio.run(TTSEngine.list_voices()))"
+  rate: "+0%"                         # Speed: "-50%" to "+100%"
+  volume: "+0%"                       # Volume adjustment
+  pitch: "+0Hz"                       # Pitch adjustment
 
 # --- Image Generation ---
 image:
