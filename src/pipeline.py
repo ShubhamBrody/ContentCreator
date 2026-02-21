@@ -419,7 +419,9 @@ class Pipeline:
         # =================================================================
         # Stage 5: Music Generation
         # =================================================================
-        # Flush VRAM left by SDXL / video stages to avoid CUDA corruption
+        # Force-unload prior GPU models so MusicGen gets a clean CUDA context.
+        self.image_generator.unload()
+        self.video_generator.unload()
         from src.gpu_utils import free_vram as _flush_vram
         _flush_vram()
 

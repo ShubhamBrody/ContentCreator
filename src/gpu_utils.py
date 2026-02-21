@@ -41,8 +41,19 @@ def log_vram(label: str = "") -> None:
 
 
 def unload_model(model: object) -> None:
-    """Move a model to CPU and free VRAM."""
+    """Move a model to CPU and free VRAM.
+
+    If the CUDA context is poisoned (device-side assert), the
+    ``model.to('cpu')`` call itself will throw.  In that case we
+    just delete the Python reference and let the GC reclaim it.
+    """
     if hasattr(model, "to"):
-        model.to("cpu")  # type: ignore[union-attr]
+        try:
+            model.to("cpu")  # type: ignore[union-attr]
+        except RuntimeError:
+            # CUDA context is broken — can't copy tensors off GPU.
+            # Just drop the reference; the memory will be freed when
+            # the CUDA context is reset or the process exits.
+            pass
     del model
     free_vram()

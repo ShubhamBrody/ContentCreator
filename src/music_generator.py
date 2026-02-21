@@ -32,8 +32,13 @@ class MusicGenerator:
         self._model: Any = None
         self._processor: Any = None
 
-    def _load_model(self) -> None:
-        """Load MusicGen model onto GPU."""
+    def _load_model(self, device: Optional[str] = None) -> None:
+        """Load MusicGen model.
+
+        Args:
+            device: Override device ('cuda' or 'cpu').  When *None* the
+                    config device is used.
+        """
         if self._model is not None:
             return
 
@@ -41,13 +46,15 @@ class MusicGenerator:
             console.print("[dim]Music generation disabled.[/dim]")
             return
 
+        target = device or str(self.config.device)
+
         # Aggressively clear CUDA state left by previous stages (SDXL, video)
         free_vram()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
             torch.cuda.ipc_collect()
 
-        console.print("[cyan]Loading MusicGen model...[/cyan]")
+        console.print(f"[cyan]Loading MusicGen model on {target}...[/cyan]")
         log_vram("before MusicGen load")
 
         from transformers import AutoProcessor, MusicgenForConditionalGeneration  # type: ignore[import-untyped]
@@ -57,10 +64,22 @@ class MusicGenerator:
 
         # MusicGen-small is only ~300 MB — always use float32 to avoid
         # cuBLAS float16 numerical instability & CUDA indexing corruption.
-        self._model = self._model.to(torch.float32).to(self.config.device)
+        self._model = self._model.to(torch.float32).to(target)
+        self._active_device = target  # remember for tokenisation
 
         log_vram("after MusicGen load")
-        console.print("[green]✓ MusicGen model loaded[/green]")
+        console.print(f"[green]✓ MusicGen model loaded on {target}[/green]")
+
+    def _force_unload(self) -> None:
+        """Drop model references WITHOUT touching CUDA.
+
+        Use this when the CUDA context is poisoned and ``model.to('cpu')``
+        would itself throw.
+        """
+        self._model = None
+        self._processor = None
+        import gc
+        gc.collect()
 
     def unload(self) -> None:
         """Unload MusicGen model and free VRAM."""
@@ -115,7 +134,8 @@ class MusicGenerator:
             padding=True,
             return_tensors="pt",
         )
-        inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
+        dev = getattr(self, "_active_device", str(self.config.device))
+        inputs = {k: v.to(dev) for k, v in inputs.items()}
 
         # Calculate max_new_tokens from duration
         # MusicGen generates at ~50 tokens/second (depends on model)
@@ -135,22 +155,21 @@ class MusicGenerator:
             except RuntimeError as exc:
                 if attempt == 0 and "CUDA" in str(exc):
                     console.print(
-                        f"[yellow]⚠ CUDA error during MusicGen, resetting and retrying...[/yellow]"
+                        "[yellow]⚠ CUDA error during MusicGen — "
+                        "falling back to CPU...[/yellow]"
                     )
-                    # Full CUDA reset: unload model, clear state, reload
-                    self.unload()
-                    if torch.cuda.is_available():
-                        torch.cuda.synchronize()
-                        torch.cuda.empty_cache()
-                        torch.cuda.ipc_collect()
-                    self._load_model()
-                    # Re-tokenize after reload
+                    # CUDA context is poisoned.  Do NOT touch the GPU.
+                    self._force_unload()
+                    # Reload entirely on CPU (MusicGen-small is ~300 MB,
+                    # runs fine on CPU).
+                    self._load_model(device="cpu")
+                    # Re-tokenize for CPU
                     inputs = self._processor(
                         text=[prompt],
                         padding=True,
                         return_tensors="pt",
                     )
-                    inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
+                    # inputs stay on CPU — no .to(device) needed
                     continue
                 raise  # non-CUDA error or second attempt failed
 
