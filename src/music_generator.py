@@ -3,14 +3,15 @@ ContentCreator - Music Generator
 
 Generates background music using Meta's MusicGen (local, free).
 Supports text-to-music with configurable duration and model sizes.
+For long videos (>30s) generates in chunks and cross-fades them.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 import torch
 from rich.console import Console
 
@@ -18,6 +19,11 @@ from src.config import Config
 from src.gpu_utils import free_vram, log_vram, unload_model
 
 console = Console()
+
+# Maximum seconds per single MusicGen generation call.
+# Keeps KV-cache small and avoids quality degradation / OOM on long videos.
+_MAX_CHUNK_SECS = 30.0
+_CROSSFADE_SECS = 1.0  # overlap between adjacent chunks
 
 
 class MusicGenerator:
@@ -102,8 +108,12 @@ class MusicGenerator:
         """
         Generate background music from a text prompt.
 
+        For durations > 30 s the audio is generated in chunks and
+        cross-faded together so the model stays within its comfortable
+        context window, avoiding OOM and quality degradation.
+
         Args:
-            prompt: Music style description (e.g., "upbeat electronic background music")
+            prompt: Music style description
             output_path: Where to save the generated audio
             duration: Duration in seconds (overrides config)
 
@@ -120,66 +130,33 @@ class MusicGenerator:
             raise RuntimeError("MusicGen model failed to load.")
 
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        duration = duration or self.duration
+        dur: float = float(duration or self.duration)
 
         console.print(
-            f"[cyan]Generating {duration}s of music: '{prompt}'[/cyan]"
+            f"[cyan]Generating {dur}s of music: '{prompt}'[/cyan]"
         )
 
         import scipy.io.wavfile  # type: ignore[import-untyped]
 
-        # Tokenize the prompt
-        inputs = self._processor(
-            text=[prompt],
-            padding=True,
-            return_tensors="pt",
-        )
-        dev = getattr(self, "_active_device", str(self.config.device))
-        inputs = {k: v.to(dev) for k, v in inputs.items()}
-
-        # Calculate max_new_tokens from duration
-        # MusicGen generates at ~50 tokens/second (depends on model)
         sample_rate = self._model.config.audio_encoder.sampling_rate
         tokens_per_second = 50  # approximate
-        max_new_tokens = int(duration * tokens_per_second)
 
-        audio_values = None
-        for attempt in range(2):
-            try:
-                with torch.no_grad():
-                    audio_values = self._model.generate(
-                        **inputs,
-                        max_new_tokens=max_new_tokens,
-                    )
-                break  # success
-            except RuntimeError as exc:
-                if attempt == 0 and "CUDA" in str(exc):
-                    console.print(
-                        "[yellow]⚠ CUDA error during MusicGen — "
-                        "falling back to CPU...[/yellow]"
-                    )
-                    # CUDA context is poisoned.  Do NOT touch the GPU.
-                    self._force_unload()
-                    # Reload entirely on CPU (MusicGen-small is ~300 MB,
-                    # runs fine on CPU).
-                    self._load_model(device="cpu")
-                    # Re-tokenize for CPU
-                    inputs = self._processor(
-                        text=[prompt],
-                        padding=True,
-                        return_tensors="pt",
-                    )
-                    # inputs stay on CPU — no .to(device) needed
-                    continue
-                raise  # non-CUDA error or second attempt failed
+        # Decide whether to use single-shot or chunked generation
+        if dur <= _MAX_CHUNK_SECS:
+            audio_data = self._generate_audio_chunk(
+                prompt, dur, tokens_per_second
+            )
+        else:
+            audio_data = self._generate_chunked(
+                prompt, dur, tokens_per_second, sample_rate
+            )
+
+        if audio_data is None:
+            console.print("[red]✗ Music generation failed[/red]")
+            return None
 
         # Save as WAV
-        audio_data = audio_values[0, 0].cpu().float().numpy()
-        scipy.io.wavfile.write(
-            output_path,
-            rate=sample_rate,
-            data=audio_data,
-        )
+        scipy.io.wavfile.write(output_path, rate=sample_rate, data=audio_data)
 
         console.print(f"[green]✓ Music saved to {output_path}[/green]")
 
@@ -187,6 +164,102 @@ class MusicGenerator:
             self.unload()
 
         return output_path
+
+    # -----------------------------------------------------------------
+    # Internal generation helpers
+    # -----------------------------------------------------------------
+
+    def _generate_audio_chunk(
+        self,
+        prompt: str,
+        duration: float,
+        tokens_per_second: int,
+    ) -> Optional[np.ndarray]:
+        """Generate a single chunk of audio, with CUDA-fallback retry."""
+        if self._model is None or self._processor is None:
+            return None
+
+        dev = getattr(self, "_active_device", str(self.config.device))
+        inputs = self._processor(
+            text=[prompt], padding=True, return_tensors="pt",
+        )
+        inputs = {k: v.to(dev) for k, v in inputs.items()}
+
+        max_new_tokens = int(duration * tokens_per_second)
+
+        audio_values = None
+        for attempt in range(2):
+            try:
+                with torch.no_grad():
+                    audio_values = self._model.generate(
+                        **inputs, max_new_tokens=max_new_tokens,
+                    )
+                break
+            except RuntimeError as exc:
+                if attempt == 0 and "CUDA" in str(exc):
+                    console.print(
+                        "[yellow]⚠ CUDA error during MusicGen — "
+                        "falling back to CPU...[/yellow]"
+                    )
+                    self._force_unload()
+                    self._load_model(device="cpu")
+                    dev = "cpu"
+                    inputs = self._processor(
+                        text=[prompt], padding=True, return_tensors="pt",
+                    )
+                    continue
+                raise
+
+        if audio_values is None:
+            return None
+        return audio_values[0, 0].cpu().float().numpy()
+
+    def _generate_chunked(
+        self,
+        prompt: str,
+        total_duration: float,
+        tokens_per_second: int,
+        sample_rate: int,
+    ) -> Optional[np.ndarray]:
+        """Generate long audio in overlapping chunks and cross-fade."""
+        overlap_samples = int(_CROSSFADE_SECS * sample_rate)
+        chunks: list[np.ndarray] = []
+        remaining = total_duration
+
+        chunk_idx = 0
+        while remaining > 0:
+            # Last chunk can be shorter
+            chunk_dur = min(remaining + _CROSSFADE_SECS, _MAX_CHUNK_SECS)
+            chunk_dur = max(chunk_dur, 2.0)  # minimum sensible length
+
+            console.print(
+                f"[dim]  Music chunk {chunk_idx + 1}: "
+                f"{chunk_dur:.0f}s ({remaining:.0f}s remaining)[/dim]"
+            )
+
+            data = self._generate_audio_chunk(prompt, chunk_dur, tokens_per_second)
+            if data is None:
+                return None
+            chunks.append(data)
+            remaining -= (chunk_dur - _CROSSFADE_SECS)
+            chunk_idx += 1
+
+        # Cross-fade adjacent chunks
+        if len(chunks) == 1:
+            return chunks[0]
+
+        result = chunks[0]
+        for next_chunk in chunks[1:]:
+            xf = min(overlap_samples, len(result), len(next_chunk))
+            if xf > 0:
+                fade_out = np.linspace(1.0, 0.0, xf, dtype=np.float32)
+                fade_in = np.linspace(0.0, 1.0, xf, dtype=np.float32)
+                result[-xf:] = result[-xf:] * fade_out + next_chunk[:xf] * fade_in
+                result = np.concatenate([result, next_chunk[xf:]])
+            else:
+                result = np.concatenate([result, next_chunk])
+
+        return result
 
     def generate_single(
         self,

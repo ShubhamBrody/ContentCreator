@@ -160,6 +160,9 @@ class ImageGenerator:
         """
         Generate an image for each scene.
 
+        Includes per-image retry logic and periodic VRAM cleanup to handle
+        heavy scene loads (20+ scenes) without CUDA OOM or fragmentation.
+
         Args:
             parsed_script: The parsed script with image prompts
             output_dir: Directory to save images
@@ -172,6 +175,8 @@ class ImageGenerator:
 
         width, height = self._get_dimensions(parsed_script.platform)
         image_files: List[str] = []
+
+        max_retries_per_image = 3
 
         with Progress(
             SpinnerColumn(),
@@ -198,15 +203,43 @@ class ImageGenerator:
                 # Build character-aware prompt
                 prompt = self._build_scene_prompt(scene)
 
-                self._generate_single_image(
-                    prompt=prompt,
-                    output_path=filepath,
-                    width=width,
-                    height=height,
-                )
+                # --- Per-image retry with VRAM recovery ---
+                last_err: Optional[Exception] = None
+                for attempt in range(1, max_retries_per_image + 1):
+                    try:
+                        self._generate_single_image(
+                            prompt=prompt,
+                            output_path=filepath,
+                            width=width,
+                            height=height,
+                        )
+                        break  # success
+                    except RuntimeError as exc:
+                        last_err = exc
+                        err_msg = str(exc).lower()
+                        console.print(
+                            f"[yellow]⚠ Image gen scene {scene.scene_number} "
+                            f"failed (attempt {attempt}/{max_retries_per_image}): "
+                            f"{exc}[/yellow]"
+                        )
+                        if "cuda" in err_msg or "out of memory" in err_msg:
+                            # VRAM fragmentation — reload model for clean state
+                            console.print("[yellow]Reloading SDXL for clean VRAM...[/yellow]")
+                            self.unload()
+                            self._load_model()
+                        else:
+                            free_vram()
+                else:
+                    raise RuntimeError(
+                        f"Image generation failed for scene {scene.scene_number} "
+                        f"after {max_retries_per_image} attempts: {last_err}"
+                    )
 
                 image_files.append(filepath)
                 scene.image_path = filepath
+
+                # Periodic VRAM cleanup to prevent fragmentation on long runs
+                free_vram()
                 progress.advance(task)
 
         console.print(f"[green]✓ Generated {len(image_files)} images[/green]")

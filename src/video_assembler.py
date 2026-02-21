@@ -3,10 +3,14 @@ ContentCreator - Video Assembler
 
 Stitches scene video clips, voiceover audio, background music,
 and subtitles into a final video using MoviePy + FFmpeg.
+
+For heavy scene loads (>12 clips), assembles in batches to avoid
+exhausting file handles and RAM.
 """
 
 from __future__ import annotations
 
+import gc
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -77,6 +81,11 @@ class VideoAssembler:
     def __init__(self, config: Config):
         self.config = config
 
+    # Maximum clips to keep open simultaneously. Beyond this, the assembler
+    # concatenates in batches and writes intermediate files to avoid file-handle
+    # and RAM exhaustion on heavy scene loads (20+ scenes).
+    _BATCH_SIZE = 10
+
     def assemble(
         self,
         parsed_script: ParsedScript,
@@ -88,6 +97,9 @@ class VideoAssembler:
     ) -> str:
         """
         Assemble all assets into the final video.
+
+        For >10 scenes, concatenation happens in batches so we never hold
+        more than ``_BATCH_SIZE`` MoviePy clip objects simultaneously.
 
         Args:
             parsed_script: The parsed script (for metadata & timing)
@@ -119,10 +131,19 @@ class VideoAssembler:
         bitrate = preset.get("bitrate", "8M")
 
         # =====================================================================
-        # 1. Load and resize video clips, attach voiceover audio
+        # 1. Build scene clips (load, resize, attach audio & subtitles)
         # =====================================================================
-        scene_clips = []
-        cumulative_time = 0.0  # track time offset for subtitles
+        scene_count = len(parsed_script.scenes)
+        use_batching = scene_count > self._BATCH_SIZE
+        if use_batching:
+            console.print(
+                f"[dim]Heavy load: {scene_count} scenes — using batched assembly[/dim]"
+            )
+
+        scene_clips: list = []
+        temp_dir = os.path.dirname(output_path) or "."
+        batch_files: list[str] = []  # intermediate mp4 paths
+        batch_idx = 0
 
         for i, scene in enumerate(parsed_script.scenes):
             clip_path = video_clips[i] if i < len(video_clips) else None
@@ -156,7 +177,7 @@ class VideoAssembler:
                             [MultiplySpeed(factor=slow_factor)]
                         )
                     else:
-                        # Large gap: loop is the only option but log a warning
+                        # Large gap: loop
                         console.print(
                             f"[yellow]Warning: Scene {i+1} video "
                             f"({clip.duration:.1f}s) much shorter than "
@@ -180,17 +201,67 @@ class VideoAssembler:
                 )
 
             scene_clips.append(clip)
-            cumulative_time += clip.duration
 
-        if not scene_clips:
+            # --- Flush batch to disk if we hit the limit ---
+            if use_batching and len(scene_clips) >= self._BATCH_SIZE:
+                batch_path = os.path.join(
+                    temp_dir, f"_batch_{batch_idx:03d}.mp4"
+                )
+                console.print(
+                    f"[dim]  Writing batch {batch_idx + 1} "
+                    f"({len(scene_clips)} clips)...[/dim]"
+                )
+                batch_clip = concatenate_videoclips(scene_clips, method="chain")
+                batch_clip.write_videofile(
+                    batch_path, fps=target_fps, codec="libx264",
+                    audio_codec="aac", bitrate=bitrate, logger=None,
+                )
+                batch_clip.close()
+                for c in scene_clips:
+                    c.close()
+                scene_clips.clear()
+                batch_files.append(batch_path)
+                batch_idx += 1
+                gc.collect()
+
+        if not scene_clips and not batch_files:
             raise RuntimeError("No video clips were loaded. Cannot assemble.")
 
         # =====================================================================
         # 2. Apply transitions and concatenate
         # =====================================================================
-        final_clip = self._concatenate_with_transitions(
-            scene_clips, parsed_script
-        )
+        if batch_files:
+            # Flush remaining clips as the last batch
+            if scene_clips:
+                batch_path = os.path.join(
+                    temp_dir, f"_batch_{batch_idx:03d}.mp4"
+                )
+                console.print(
+                    f"[dim]  Writing batch {batch_idx + 1} "
+                    f"({len(scene_clips)} clips)...[/dim]"
+                )
+                batch_clip = concatenate_videoclips(scene_clips, method="chain")
+                batch_clip.write_videofile(
+                    batch_path, fps=target_fps, codec="libx264",
+                    audio_codec="aac", bitrate=bitrate, logger=None,
+                )
+                batch_clip.close()
+                for c in scene_clips:
+                    c.close()
+                scene_clips.clear()
+                batch_files.append(batch_path)
+                gc.collect()
+
+            # Re-load batches (now just N/10 files) and concatenate
+            console.print(
+                f"[dim]  Joining {len(batch_files)} batches...[/dim]"
+            )
+            batch_clips = [VideoFileClip(bf) for bf in batch_files]
+            final_clip = concatenate_videoclips(batch_clips, method="chain")
+        else:
+            final_clip = self._concatenate_with_transitions(
+                scene_clips, parsed_script
+            )
 
         # =====================================================================
         # 3. Add background music
@@ -239,6 +310,12 @@ class VideoAssembler:
         final_clip.close()
         for clip in scene_clips:
             clip.close()
+        if batch_files:
+            for bf_clip_path in batch_files:
+                try:
+                    os.remove(bf_clip_path)
+                except OSError:
+                    pass
 
         console.print(f"[green bold]✓ Final video saved: {output_path}[/green bold]")
         return output_path

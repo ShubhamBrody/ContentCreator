@@ -466,6 +466,7 @@ class Pipeline:
                 subtitles = await self.subtitle_generator.generate_subtitles(
                     audio_files, srt_dir
                 )
+                artifacts.subtitle_file = srt_dir
                 completed_so_far.append("subtitles")
                 _save_checkpoint(completed_so_far)
                 await _report("subtitles", "completed", "Subtitles generated")

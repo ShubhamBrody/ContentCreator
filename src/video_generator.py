@@ -15,6 +15,7 @@ and must be looped to fill longer narrations, causing visible repetition.
 
 from __future__ import annotations
 
+import gc
 import os
 import random
 from enum import Enum
@@ -521,6 +522,11 @@ class VideoGenerator:
             logger=None,
         )
         motion_clip.close()
+
+        # Eagerly free the 2× upscaled image array to prevent RAM creep
+        # across many scenes (the make_frame closure holds a reference).
+        del img_array, image
+        gc.collect()
 
     # =========================================================================
     # Utility

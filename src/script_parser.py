@@ -116,6 +116,26 @@ class ScriptParser:
         self.temperature = config.llm.get("temperature", 0.7)
         self.max_tokens = config.llm.get("max_tokens", 4096)
 
+    # Approximate LLM output tokens per scene (narration + image_prompt + JSON keys)
+    _TOKENS_PER_SCENE = 350
+    _TOKEN_OVERHEAD = 512  # title, description, music_prompt, visual_style, JSON wrapper
+
+    def _estimate_max_tokens(
+        self, platform: Platform, num_scenes: Optional[int]
+    ) -> int:
+        """Compute the minimum ``num_predict`` so the LLM won't truncate."""
+        if num_scenes:
+            needed = num_scenes * self._TOKENS_PER_SCENE + self._TOKEN_OVERHEAD
+        else:
+            # Platform-based defaults
+            default_scenes = {
+                Platform.REELS: 10,
+                Platform.SHORTS: 10,
+                Platform.YOUTUBE: 30,
+            }
+            needed = default_scenes.get(platform, 10) * self._TOKENS_PER_SCENE + self._TOKEN_OVERHEAD
+        return max(self.max_tokens, needed)
+
     async def parse(
         self,
         script: str,
@@ -156,6 +176,7 @@ class ScriptParser:
         console.print(Panel(f"[bold cyan]Parsing script with {self.model}[/bold cyan]"))
 
         user_prompt = self._build_user_prompt(script, platform, num_scenes, characters)
+        required_tokens = self._estimate_max_tokens(platform, num_scenes)
 
         last_error: Optional[Exception] = None
         for attempt in range(1, max_retries + 1):
@@ -164,7 +185,7 @@ class ScriptParser:
                     console.print(f"[yellow]Retry {attempt}/{max_retries}...[/yellow]")
 
                 # Call Ollama API
-                response_text = await self._call_ollama(user_prompt)
+                response_text = await self._call_ollama(user_prompt, required_tokens)
 
                 # Parse JSON from response
                 parsed_data = self._extract_json(response_text)
@@ -357,9 +378,12 @@ Break this into scenes. Respond with ONLY the JSON."""
 
         return prompt
 
-    async def _call_ollama(self, user_prompt: str) -> str:
+    async def _call_ollama(
+        self, user_prompt: str, max_tokens: Optional[int] = None
+    ) -> str:
         """Call the Ollama chat API with JSON format enforcement."""
         url = f"{self.base_url}/api/chat"
+        num_predict = max_tokens or self.max_tokens
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -370,7 +394,7 @@ Break this into scenes. Respond with ONLY the JSON."""
             "stream": False,
             "options": {
                 "temperature": self.temperature,
-                "num_predict": self.max_tokens,
+                "num_predict": num_predict,
             },
         }
 
