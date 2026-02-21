@@ -17,10 +17,17 @@ llm:
 tts:
   engine: "edge"                      # "edge" (Microsoft Edge TTS, free, high quality)
   language: "en"
-  voice: "en-US-GuyNeural"            # See available voices: python -c "import asyncio; from src.tts_engine import TTSEngine; print(asyncio.run(TTSEngine.list_voices()))"
-  rate: "+0%"                         # Speed: "-50%" to "+100%"
+  # Expressive voices with emotional style support (best → good):
+  #   en-US-AriaNeural    — Female, 30+ styles, BEST for storytelling
+  #   en-US-JennyNeural   — Female, warm & professional
+  #   en-US-DavisNeural   — Male, conversational storyteller
+  #   en-US-GuyNeural     — Male, authoritative narrator
+  #   en-US-JasonNeural   — Male, natural & expressive
+  #   en-US-SaraNeural    — Female, friendly narrator
+  voice: "en-US-AriaNeural"           # Most expressive voice — supports excited, sad, dramatic, whispering, etc.
+  rate: "+0%"                         # Base speed (overridden per scene by narration_tone)
   volume: "+0%"                       # Volume adjustment
-  pitch: "+0Hz"                       # Pitch adjustment
+  pitch: "+0Hz"                       # Base pitch (overridden per scene by narration_tone)
 
 # --- Image Generation ---
 image:

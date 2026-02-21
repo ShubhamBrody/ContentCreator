@@ -102,8 +102,32 @@ class Scene(BaseModel):
         default=None,
         description="Music mood/style for this scene (e.g., 'upbeat', 'dramatic')"
     )
+    narration_tone: Optional[str] = Field(
+        default="neutral",
+        description=(
+            "Emotional delivery tone for the voiceover. "
+            "One of: excited, dramatic, calm, sad, angry, hopeful, cheerful, "
+            "serious, fearful, inspiring, mysterious, epic, gentle, friendly, "
+            "tense, triumphant, neutral"
+        ),
+    )
 
     # --- Validators: handle common LLM output variations ---
+
+    @field_validator("narration_tone", mode="before")
+    @classmethod
+    def _normalize_tone(cls, v):
+        """Accept any casing and fall back to 'neutral' for unknown tones."""
+        _VALID_TONES = {
+            "excited", "dramatic", "calm", "sad", "angry", "hopeful",
+            "cheerful", "serious", "fearful", "inspiring", "mysterious",
+            "epic", "gentle", "friendly", "tense", "triumphant", "neutral",
+        }
+        if isinstance(v, str):
+            v = v.strip().lower()
+            if v in _VALID_TONES:
+                return v
+        return "neutral"
 
     @field_validator("character_actions", "character_emotions", mode="before")
     @classmethod
