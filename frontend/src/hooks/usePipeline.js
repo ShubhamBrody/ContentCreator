@@ -22,7 +22,24 @@ export default function usePipeline() {
   const [stageTimings, setStageTimings] = useState({})
   const [totalElapsed, setTotalElapsed] = useState(0)
   const [totalEta, setTotalEta] = useState(0)
+  const [resumable, setResumable] = useState([])
   const eventSourceRef = useRef(null)
+
+  // Fetch resumable projects on mount
+  const fetchResumable = useCallback(async () => {
+    try {
+      const res = await fetch('/api/resumable')
+      if (res.ok) {
+        const data = await res.json()
+        setResumable(data.resumable || [])
+      }
+    } catch {
+      // silently ignore
+    }
+  }, [])
+
+  // Check for resumable on first render
+  useState(() => { fetchResumable() })
 
   const generate = useCallback(async (formData) => {
     setIsSubmitting(true)
@@ -40,52 +57,80 @@ export default function usePipeline() {
       }
 
       const { job_id } = await response.json()
-      setJobId(job_id)
-      setView('progress')
-      setIsSubmitting(false)
-
-      // Open SSE stream
-      const es = new EventSource(`/api/progress/${job_id}`)
-      eventSourceRef.current = es
-
-      es.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data)
-          setStages(data.stages || {})
-          setProgress(data.progress || 0)
-          setMessage(data.message || '')
-          setStageTimings(data.stage_timings || {})
-          setTotalElapsed(data.total_elapsed || 0)
-          setTotalEta(data.total_eta || 0)
-
-          if (data.status === 'completed') {
-            setView('result')
-            es.close()
-          }
-
-          if (data.status === 'failed') {
-            setError(data.error || 'Generation failed')
-            setView('create')
-            es.close()
-          }
-        } catch {
-          // ignore parse errors
-        }
-      }
-
-      es.onerror = () => {
-        // Retry a few times, then give up
-        setTimeout(() => {
-          if (es.readyState === EventSource.CLOSED) {
-            setError('Connection lost. Check if the server is running.')
-            setView('create')
-          }
-        }, 3000)
-      }
-
+      _startTracking(job_id)
     } catch (err) {
       setError(err.message)
       setIsSubmitting(false)
+    }
+  }, [])
+
+  const resume = useCallback(async (projectDir) => {
+    setIsSubmitting(true)
+    setError(null)
+
+    try {
+      const fd = new FormData()
+      fd.append('project_dir', projectDir)
+
+      const response = await fetch('/api/resume', {
+        method: 'POST',
+        body: fd,
+      })
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}))
+        throw new Error(err.detail || `Resume failed (${response.status})`)
+      }
+
+      const { job_id } = await response.json()
+      _startTracking(job_id)
+    } catch (err) {
+      setError(err.message)
+      setIsSubmitting(false)
+    }
+  }, [])
+
+  /** Shared helper: start SSE tracking for a job */
+  const _startTracking = useCallback((job_id) => {
+    setJobId(job_id)
+    setView('progress')
+    setIsSubmitting(false)
+
+    const es = new EventSource(`/api/progress/${job_id}`)
+    eventSourceRef.current = es
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        setStages(data.stages || {})
+        setProgress(data.progress || 0)
+        setMessage(data.message || '')
+        setStageTimings(data.stage_timings || {})
+        setTotalElapsed(data.total_elapsed || 0)
+        setTotalEta(data.total_eta || 0)
+
+        if (data.status === 'completed') {
+          setView('result')
+          es.close()
+        }
+
+        if (data.status === 'failed') {
+          setError(data.error || 'Generation failed')
+          setView('create')
+          es.close()
+        }
+      } catch {
+        // ignore parse errors
+      }
+    }
+
+    es.onerror = () => {
+      setTimeout(() => {
+        if (es.readyState === EventSource.CLOSED) {
+          setError('Connection lost. Check if the server is running.')
+          setView('create')
+        }
+      }, 3000)
     }
   }, [])
 
@@ -103,7 +148,8 @@ export default function usePipeline() {
     setStageTimings({})
     setTotalElapsed(0)
     setTotalEta(0)
-  }, [])
+    fetchResumable()  // refresh resumable list
+  }, [fetchResumable])
 
   return {
     view,
@@ -116,7 +162,9 @@ export default function usePipeline() {
     stageTimings,
     totalElapsed,
     totalEta,
+    resumable,
     generate,
+    resume,
     reset,
   }
 }

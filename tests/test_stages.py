@@ -377,3 +377,83 @@ class TestAPIServer:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["stages"]) == 8
+
+    def test_resumable_endpoint(self):
+        from fastapi.testclient import TestClient
+        from src.api_server import app
+
+        client = TestClient(app)
+        resp = client.get("/api/resumable")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "resumable" in data
+        assert isinstance(data["resumable"], list)
+
+
+# =========================================================================
+# 9. Checkpoint Manager
+# =========================================================================
+
+
+class TestCheckpointManager:
+    """Test checkpoint save / load / validate / delete."""
+
+    def test_save_and_load(self, tmp_dir):
+        from src.checkpoint import CheckpointManager
+
+        mgr = CheckpointManager(tmp_dir)
+        mgr.save(
+            params={"script": "test", "platform": "reels"},
+            completed_stages=["script_parse", "tts"],
+            artifacts={"scene_audio_files": ["/fake/audio.mp3"]},
+            active_stages=["script_parse", "tts", "image_gen", "assemble"],
+        )
+
+        ckpt = mgr.load()
+        assert ckpt is not None
+        assert ckpt["completed_stages"] == ["script_parse", "tts"]
+        assert ckpt["params"]["script"] == "test"
+
+    def test_validate_missing_file(self, tmp_dir):
+        from src.checkpoint import CheckpointManager
+
+        mgr = CheckpointManager(tmp_dir)
+        mgr.save(
+            params={},
+            completed_stages=["tts"],
+            artifacts={"scene_audio_files": ["/nonexistent/file.mp3"]},
+            active_stages=["tts", "image_gen"],
+        )
+
+        ckpt = mgr.load()
+        assert not mgr.validate(ckpt), "Should fail validation when files are missing"
+
+    def test_delete(self, tmp_dir):
+        from src.checkpoint import CheckpointManager
+
+        mgr = CheckpointManager(tmp_dir)
+        mgr.save(
+            params={}, completed_stages=[], artifacts={}, active_stages=["assemble"],
+        )
+        assert mgr.load() is not None
+        mgr.delete()
+        assert mgr.load() is None
+
+    def test_find_resumable(self, tmp_dir):
+        from src.checkpoint import CheckpointManager
+
+        # Create a project sub-directory with an incomplete checkpoint
+        proj = os.path.join(tmp_dir, "video_test")
+        os.makedirs(proj)
+        mgr = CheckpointManager(proj)
+        mgr.save(
+            params={"script": "hello"},
+            completed_stages=["script_parse"],
+            artifacts={"parsed_script": "not_a_file_ext"},  # non-path value
+            active_stages=["script_parse", "tts", "assemble"],
+        )
+
+        found = CheckpointManager.find_resumable(tmp_dir)
+        assert len(found) == 1
+        assert found[0]["project_name"] == "video_test"
+        assert "tts" in found[0]["remaining_stages"]

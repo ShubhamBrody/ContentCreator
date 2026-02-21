@@ -20,6 +20,8 @@ export default function App() {
         {pipeline.view === 'create' && (
           <CreateView
             onGenerate={pipeline.generate}
+            onResume={pipeline.resume}
+            resumable={pipeline.resumable}
             isSubmitting={pipeline.isSubmitting}
             error={pipeline.error}
           />

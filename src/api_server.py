@@ -28,6 +28,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.config import Config
+from src.checkpoint import CheckpointManager
 from src.models.schemas import Platform
 from src.pipeline import Pipeline
 
@@ -263,6 +264,7 @@ async def _pipeline_work(
             characters=params.get("characters"),
             character_style=params.get("character_style"),
             progress_callback=cb,
+            resume_dir=params.get("resume_dir"),
         )
 
         jobs[job_id]["status"] = "completed"
@@ -393,6 +395,52 @@ async def get_video(job_id: str):
 @app.get("/api/stages")
 async def get_stages():
     return {"stages": STAGES}
+
+
+@app.get("/api/resumable")
+async def list_resumable():
+    """Return a list of projects that can be resumed from a checkpoint."""
+    config = Config()
+    output_dir = config.output.get("directory", "output")
+    items = CheckpointManager.find_resumable(output_dir)
+    return {"resumable": items}
+
+
+@app.post("/api/resume")
+async def resume_project(
+    project_dir: str = Form(...),
+):
+    """Resume a previously interrupted pipeline run from its checkpoint."""
+    mgr = CheckpointManager(project_dir)
+    ckpt = mgr.load()
+    if ckpt is None or not mgr.validate(ckpt):
+        raise HTTPException(400, "No valid checkpoint found for this project")
+
+    params = ckpt.get("params", {})
+    active_stages = ckpt.get("active_stages", [])
+    completed = set(ckpt.get("completed_stages", []))
+
+    # Build config with same overrides as original run
+    config = Config()
+
+    job_id = str(uuid.uuid4())[:8]
+    jobs[job_id] = _init_job(job_id, active_stages)
+
+    # Mark already-completed stages instantly
+    for s in completed:
+        if s in jobs[job_id]["stages"]:
+            jobs[job_id]["stages"][s] = "completed"
+
+    params["resume_dir"] = project_dir
+
+    asyncio.create_task(_run_pipeline_job(job_id, config, params))
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "resumed_from": project_dir,
+        "skipped_stages": list(completed),
+    }
 
 
 @app.get("/api/health")

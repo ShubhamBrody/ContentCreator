@@ -8,6 +8,7 @@ Creates styled subtitle overlays for the final video.
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +17,26 @@ from rich.console import Console
 
 from src.config import Config
 from src.gpu_utils import free_vram, log_vram
+
+
+def _ensure_ffmpeg_on_path() -> None:
+    """Make sure ``ffmpeg`` is reachable.
+
+    Whisper shells out to ``ffmpeg`` to decode audio.  If the user
+    doesn't have a system-wide install, we fall back to the copy
+    bundled by *imageio-ffmpeg* (a MoviePy dependency already present
+    in the venv).
+    """
+    if shutil.which("ffmpeg"):
+        return  # already on PATH
+
+    try:
+        import imageio_ffmpeg  # type: ignore[import-untyped]
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_dir = str(Path(ffmpeg_exe).parent)
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass  # last resort: let Whisper fail with a clear error
 
 console = Console()
 
@@ -65,6 +86,8 @@ class SubtitleGenerator:
         """Load Whisper model."""
         if self._model is not None:
             return
+
+        _ensure_ffmpeg_on_path()
 
         console.print(f"[cyan]Loading Whisper ({self.model_size}) for subtitles...[/cyan]")
         log_vram("before Whisper load")

@@ -3,7 +3,7 @@ import {
   Sparkles, MonitorPlay, Smartphone, Film,
   Mic, Music, MessageSquare, Palette,
   ChevronDown, ChevronUp, Plus, Trash2,
-  AlertCircle, Wand2,
+  AlertCircle, Wand2, RotateCcw, Clock,
 } from 'lucide-react'
 
 const PLATFORMS = [
@@ -51,7 +51,7 @@ function Toggle({ enabled, onChange, label }) {
   )
 }
 
-export default function CreateView({ onGenerate, isSubmitting, error }) {
+export default function CreateView({ onGenerate, onResume, resumable = [], isSubmitting, error }) {
   const [script, setScript] = useState('')
   const [platform, setPlatform] = useState('reels')
   const [numScenes, setNumScenes] = useState(7)
@@ -124,6 +124,55 @@ export default function CreateView({ onGenerate, isSubmitting, error }) {
         <div className="glass border-red-500/30 !border flex items-center gap-3 p-4 rounded-xl animate-slide-up">
           <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
           <p className="text-red-300 text-sm">{error}</p>
+        </div>
+      )}
+
+      {/* Resume banner — shown when interrupted runs are available */}
+      {resumable.length > 0 && (
+        <div className="glass gradient-border p-1 rounded-2xl animate-slide-up">
+          <div className="bg-dark-900/90 rounded-[0.9rem] p-4 sm:p-5 space-y-3">
+            <div className="flex items-center gap-2 text-xs font-semibold text-amber-400 uppercase tracking-wider">
+              <RotateCcw className="w-3.5 h-3.5" />
+              Interrupted Runs
+            </div>
+            {resumable.map((item, idx) => (
+              <div
+                key={idx}
+                className="flex items-center gap-4 bg-white/[0.03] border border-white/5 rounded-xl p-3 sm:p-4"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-white font-medium truncate">
+                    {item.params?.script?.slice(0, 60) || item.project_name}
+                    {(item.params?.script?.length || 0) > 60 ? '...' : ''}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
+                    <Clock className="w-3 h-3 inline" />
+                    {item.updated_at ? new Date(item.updated_at).toLocaleString() : 'Unknown time'}
+                    <span className="text-slate-600">·</span>
+                    <span className="text-emerald-400/70">
+                      {item.completed_stages?.length || 0}/{item.active_stages?.length || 0} stages done
+                    </span>
+                    <span className="text-slate-600">·</span>
+                    <span className="text-neon-cyan/70">
+                      {item.remaining_stages?.length || 0} remaining
+                    </span>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() => onResume(item.project_dir)}
+                  className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg
+                    border border-amber-500/40 bg-amber-500/10 text-amber-400
+                    hover:bg-amber-500/20 hover:border-amber-500/60
+                    transition-all text-xs font-semibold disabled:opacity-40"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Resume
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

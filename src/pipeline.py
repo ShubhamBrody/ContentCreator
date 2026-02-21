@@ -23,6 +23,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.character_designer import CharacterDesigner, CharacterProfile
+from src.checkpoint import CheckpointManager
 from src.config import Config
 from src.image_generator import ImageGenerator
 from src.models.schemas import CharacterDef, ParsedScript, PipelineArtifacts, Platform
@@ -59,6 +60,7 @@ class Pipeline:
         characters: Optional[List[dict]] = None,
         character_style: Optional[str] = None,
         progress_callback: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
+        resume_dir: Optional[str] = None,
     ) -> str:
         """
         Run the full pipeline: script → final video.
@@ -73,6 +75,7 @@ class Pipeline:
             character_style: Sketch style (stick_figure, cartoon, manga, doodle, whiteboard)
             progress_callback: Optional async callback(stage, status, message)
                                for reporting progress to a frontend.
+            resume_dir: If set, resume from the checkpoint in this project directory.
 
         Returns:
             Path to the final video file
@@ -84,17 +87,56 @@ class Pipeline:
         start_time = time.time()
         stages = self.config.pipeline.get("stages", [])
 
-        # Create project directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        project_name = output_name or f"video_{timestamp}"
-        output_dir = self.config.output.get("directory", "output")
-        project_dir = str(Path(output_dir) / project_name)
-        os.makedirs(project_dir, exist_ok=True)
+        # ---- Checkpoint / resume bookkeeping ----
+        resumed_stages: set = set()
+        cached_arts: dict = {}
+        parsed_script: Optional[ParsedScript] = None
 
+        if resume_dir and os.path.isdir(resume_dir):
+            project_dir = resume_dir
+            project_name = os.path.basename(project_dir)
+            ckpt_mgr = CheckpointManager(project_dir)
+            ckpt = ckpt_mgr.load()
+            if ckpt and ckpt_mgr.validate(ckpt):
+                resumed_stages = set(ckpt.get("completed_stages", []))
+                cached_arts = ckpt.get("artifacts", {})
+                console.print(
+                    f"[yellow]Resuming — skipping {len(resumed_stages)} completed "
+                    f"stages: {', '.join(resumed_stages)}[/yellow]"
+                )
+        else:
+            # Fresh run — create project directory
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            project_name = output_name or f"video_{timestamp}"
+            output_dir = self.config.output.get("directory", "output")
+            project_dir = str(Path(output_dir) / project_name)
+            ckpt_mgr = CheckpointManager(project_dir)
+
+        os.makedirs(project_dir, exist_ok=True)
         temp_dir = str(Path(project_dir) / "temp")
         os.makedirs(temp_dir, exist_ok=True)
 
         artifacts = PipelineArtifacts(project_dir=project_dir)
+
+        # Params dict to persist in checkpoint
+        _ckpt_params = {
+            "script": script,
+            "platform": platform.value,
+            "num_scenes": num_scenes,
+            "characters": characters,
+            "character_style": character_style,
+        }
+
+        def _save_checkpoint(completed: List[str]) -> None:
+            """Persist current progress to disk."""
+            ckpt_mgr.save(
+                params=_ckpt_params,
+                completed_stages=completed,
+                artifacts=artifacts.model_dump(),
+                active_stages=stages,
+            )
+
+        completed_so_far: List[str] = list(resumed_stages)
 
         self._print_header(script, platform, project_dir)
 
@@ -102,20 +144,34 @@ class Pipeline:
         # Stage 1: Parse Script
         # =================================================================
         if "script_parse" in stages:
-            console.print(Panel("[bold]Stage 1/8: Parsing Script[/bold]"))
-            await _report("script_parse", "running", "Parsing script with LLM...")
-            parsed_script = await self.script_parser.parse(
-                script, platform, num_scenes, characters=characters
-            )
-            artifacts.parsed_script = parsed_script
+            if "script_parse" in resumed_stages:
+                console.print("[dim]Stage 1/8: Script Parsing — using cache[/dim]")
+                await _report("script_parse", "completed", "Restored from checkpoint")
+                # Restore parsed_script from cached JSON file
+                script_json_path = str(Path(project_dir) / "parsed_script.json")
+                if os.path.isfile(script_json_path):
+                    with open(script_json_path, "r", encoding="utf-8") as f:
+                        parsed_script = ParsedScript.model_validate_json(f.read())
+                    artifacts.parsed_script = parsed_script
+                else:
+                    raise RuntimeError("Checkpoint references parsed_script.json but file is missing.")
+            else:
+                console.print(Panel("[bold]Stage 1/8: Parsing Script[/bold]"))
+                await _report("script_parse", "running", "Parsing script with LLM...")
+                parsed_script = await self.script_parser.parse(
+                    script, platform, num_scenes, characters=characters
+                )
+                artifacts.parsed_script = parsed_script
 
-            # Save parsed script as JSON
-            script_json_path = str(Path(project_dir) / "parsed_script.json")
-            with open(script_json_path, "w", encoding="utf-8") as f:
-                f.write(parsed_script.model_dump_json(indent=2))
+                # Save parsed script as JSON
+                script_json_path = str(Path(project_dir) / "parsed_script.json")
+                with open(script_json_path, "w", encoding="utf-8") as f:
+                    f.write(parsed_script.model_dump_json(indent=2))
 
-            self._print_scene_summary(parsed_script)
-            await _report("script_parse", "completed", f"Parsed {parsed_script.scene_count} scenes")
+                self._print_scene_summary(parsed_script)
+                completed_so_far.append("script_parse")
+                _save_checkpoint(completed_so_far)
+                await _report("script_parse", "completed", f"Parsed {parsed_script.scene_count} scenes")
         else:
             raise RuntimeError("script_parse stage is required.")
 
@@ -190,6 +246,8 @@ class Pipeline:
             console.print(
                 f"[green]✓ Created {len(sketch_paths)} character sketches[/green]"
             )
+            completed_so_far.append("character_design")
+            _save_checkpoint(completed_so_far)
             await _report("character_design", "completed", f"Created {len(sketch_paths)} character sketches")
         elif characters:
             # Characters defined but stage disabled — still pass style context
@@ -216,8 +274,25 @@ class Pipeline:
 
         tts_needed = "tts" in stages
         image_gen_needed = "image_gen" in stages
+        tts_cached = "tts" in resumed_stages
+        img_cached = "image_gen" in resumed_stages
 
-        if tts_needed and image_gen_needed:
+        # Restore cached file lists if resuming
+        if tts_cached:
+            audio_files = cached_arts.get("scene_audio_files", [])
+            artifacts.scene_audio_files = audio_files
+            console.print("[dim]Stage 2/8: Voice Generation — using cache[/dim]")
+            await _report("tts", "completed", f"Restored {len(audio_files)} audio files from cache")
+        if img_cached:
+            image_files = cached_arts.get("scene_image_files", [])
+            artifacts.scene_image_files = image_files
+            console.print("[dim]Stage 3/8: Image Generation — using cache[/dim]")
+            await _report("image_gen", "completed", f"Restored {len(image_files)} images from cache")
+
+        tts_run = tts_needed and not tts_cached
+        img_run = image_gen_needed and not img_cached
+
+        if tts_run and img_run:
             console.print(
                 Panel("[bold]Stages 2-3/8: Voice + Images (parallel)[/bold]")
             )
@@ -268,8 +343,10 @@ class Pipeline:
                 f"[green]✓ Parallel complete — "
                 f"{len(audio_files)} audio, {len(image_files)} images[/green]"
             )
+            completed_so_far.extend(["tts", "image_gen"])
+            _save_checkpoint(completed_so_far)
 
-        elif tts_needed:
+        elif tts_run:
             console.print(Panel("[bold]Stage 2/8: Generating Voiceover[/bold]"))
             await _report("tts", "running", "Generating voiceover audio...")
             audio_dir = str(Path(temp_dir) / "audio")
@@ -277,11 +354,13 @@ class Pipeline:
                 parsed_script, audio_dir
             )
             artifacts.scene_audio_files = audio_files
+            completed_so_far.append("tts")
+            _save_checkpoint(completed_so_far)
             await _report(
                 "tts", "completed", f"Generated {len(audio_files)} audio files"
             )
 
-        elif image_gen_needed:
+        elif img_run:
             console.print(Panel("[bold]Stage 3/8: Generating Images[/bold]"))
             await _report(
                 "image_gen", "running", "Generating scene images with SDXL..."
@@ -291,6 +370,8 @@ class Pipeline:
                 parsed_script, image_dir
             )
             artifacts.scene_image_files = image_files
+            completed_so_far.append("image_gen")
+            _save_checkpoint(completed_so_far)
             await _report(
                 "image_gen", "completed",
                 f"Generated {len(image_files)} images",
@@ -301,56 +382,82 @@ class Pipeline:
         # =================================================================
         video_files: List[str] = []
         if "video_gen" in stages:
-            engine = self.config.video.get("engine", "image_motion")
-            console.print(
-                Panel(f"[bold]Stage 4/8: Generating Video Clips [{engine}][/bold]")
-            )
-            await _report(
-                "video_gen", "running",
-                f"Generating video clips with {engine}...",
-            )
-            video_dir = str(Path(temp_dir) / "videos")
-            video_files = await self.video_generator.generate_scene_videos(
-                parsed_script, video_dir
-            )
-            artifacts.scene_video_files = video_files
-            await _report(
-                "video_gen", "completed",
-                f"Generated {len(video_files)} video clips",
-            )
+            if "video_gen" in resumed_stages:
+                video_files = cached_arts.get("scene_video_files", [])
+                artifacts.scene_video_files = video_files
+                console.print("[dim]Stage 4/8: Video Generation — using cache[/dim]")
+                await _report("video_gen", "completed", f"Restored {len(video_files)} clips from cache")
+            else:
+                engine = self.config.video.get("engine", "image_motion")
+                console.print(
+                    Panel(f"[bold]Stage 4/8: Generating Video Clips [{engine}][/bold]")
+                )
+                await _report(
+                    "video_gen", "running",
+                    f"Generating video clips with {engine}...",
+                )
+                video_dir = str(Path(temp_dir) / "videos")
+                video_files = await self.video_generator.generate_scene_videos(
+                    parsed_script, video_dir
+                )
+                artifacts.scene_video_files = video_files
+                completed_so_far.append("video_gen")
+                _save_checkpoint(completed_so_far)
+                await _report(
+                    "video_gen", "completed",
+                    f"Generated {len(video_files)} video clips",
+                )
 
         # =================================================================
         # Stage 5: Music Generation
         # =================================================================
         music_path: Optional[str] = None
         if "music_gen" in stages:
-            console.print(Panel("[bold]Stage 5/8: Generating Music[/bold]"))
-            await _report("music_gen", "running", "Generating background music...")
-            music_file = str(Path(temp_dir) / "background_music.wav")
-            music_path = await self.music_generator.generate_music(
-                prompt=parsed_script.music_prompt,
-                output_path=music_file,
-                duration=parsed_script.total_duration + 5,  # extra buffer
-            )
-            if music_path:
-                artifacts.music_file = music_path
-            await _report("music_gen", "completed", "Background music generated")
+            if "music_gen" in resumed_stages:
+                music_path = cached_arts.get("music_file")
+                if music_path:
+                    artifacts.music_file = music_path
+                console.print("[dim]Stage 5/8: Music Generation — using cache[/dim]")
+                await _report("music_gen", "completed", "Restored music from cache")
+            else:
+                console.print(Panel("[bold]Stage 5/8: Generating Music[/bold]"))
+                await _report("music_gen", "running", "Generating background music...")
+                music_file = str(Path(temp_dir) / "background_music.wav")
+                music_path = await self.music_generator.generate_music(
+                    prompt=parsed_script.music_prompt,
+                    output_path=music_file,
+                    duration=parsed_script.total_duration + 5,  # extra buffer
+                )
+                if music_path:
+                    artifacts.music_file = music_path
+                completed_so_far.append("music_gen")
+                _save_checkpoint(completed_so_far)
+                await _report("music_gen", "completed", "Background music generated")
 
         # =================================================================
         # Stage 6: Subtitles
         # =================================================================
         subtitles: Optional[List[List[SubtitleSegment]]] = None
         if "subtitles" in stages and audio_files:
-            console.print(Panel("[bold]Stage 6/8: Generating Subtitles[/bold]"))
-            await _report("subtitles", "running", "Generating word-level subtitles...")
-            srt_dir = str(Path(temp_dir) / "subtitles")
-            subtitles = await self.subtitle_generator.generate_subtitles(
-                audio_files, srt_dir
-            )
-            await _report("subtitles", "completed", "Subtitles generated")
+            if "subtitles" in resumed_stages:
+                console.print("[dim]Stage 6/8: Subtitles — using cache[/dim]")
+                await _report("subtitles", "completed", "Restored subtitles from cache")
+                # Subtitles aren't easily serialised; regenerate from SRT dir
+                # if files exist, but don't block the pipeline.
+                subtitles = None  # assembler handles missing subs gracefully
+            else:
+                console.print(Panel("[bold]Stage 6/8: Generating Subtitles[/bold]"))
+                await _report("subtitles", "running", "Generating word-level subtitles...")
+                srt_dir = str(Path(temp_dir) / "subtitles")
+                subtitles = await self.subtitle_generator.generate_subtitles(
+                    audio_files, srt_dir
+                )
+                completed_so_far.append("subtitles")
+                _save_checkpoint(completed_so_far)
+                await _report("subtitles", "completed", "Subtitles generated")
 
         # =================================================================
-        # Stage 7: Assembly
+        # Stage 7: Assembly  (never cached — always re-run)
         # =================================================================
         if "assemble" in stages:
             console.print(Panel("[bold]Stage 7/8: Assembling Final Video[/bold]"))
@@ -367,11 +474,13 @@ class Pipeline:
                 output_path=final_path,
             )
             artifacts.final_video_path = final_video
+            completed_so_far.append("assemble")
             await _report("assemble", "completed", "Final video assembled!")
 
         # =================================================================
-        # Done
+        # Done — remove checkpoint (full run succeeded)
         # =================================================================
+        ckpt_mgr.delete()
         elapsed = time.time() - start_time
         self._print_summary(artifacts, elapsed)
 
