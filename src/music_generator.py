@@ -123,7 +123,7 @@ class MusicGenerator:
             )
 
         # Save as WAV
-        audio_data = audio_values[0, 0].cpu().numpy()
+        audio_data = audio_values[0, 0].cpu().float().numpy()  # float16→float32 for scipy
         scipy.io.wavfile.write(
             output_path,
             rate=sample_rate,
