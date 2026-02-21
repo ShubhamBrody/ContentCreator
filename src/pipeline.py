@@ -398,7 +398,7 @@ class Pipeline:
                 )
                 video_dir = str(Path(temp_dir) / "videos")
                 video_files = await self.video_generator.generate_scene_videos(
-                    parsed_script, video_dir
+                    parsed_script, video_dir, audio_files=audio_files
                 )
                 artifacts.scene_video_files = video_files
                 completed_so_far.append("video_gen")

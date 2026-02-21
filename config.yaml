@@ -36,8 +36,17 @@ image:
 
 # --- Video Generation ---
 video:
-  engine: "animatediff"               # "animatediff" (24fps AI motion) | "svd" | "image_motion"
-  # --- AnimateDiff (primary — text-to-animated-video, ~8-10 GB VRAM) ---
+  engine: "image_motion"              # "image_motion" (smooth Ken Burns, DEFAULT) | "animatediff" | "svd"
+  # --- Advanced Ken Burns (primary — cinematic zoom/pan/drift on AI images) ---
+  image_motion:
+    zoom_range: [1.0, 1.20]           # max zoom factor (1.0 = no zoom, 1.2 = 20% zoom)
+    pan_range: [-0.08, 0.08]          # horizontal/vertical pan as fraction of image
+    duration_per_scene: 5             # fallback duration when audio not available
+    fps: 24                           # output frame rate
+  # --- AnimateDiff (alternative — text-to-animated-video, ~8-10 GB VRAM) ---
+  # NOTE: AnimateDiff generates a fixed number of frames (typically 16 = 0.67s
+  #       at 24fps). The assembler will slow-motion or loop to fill the
+  #       narration. Use image_motion for best results.
   animatediff:
     base_model: "SG161222/Realistic_Vision_V5.1_noVAE"   # SD 1.5 checkpoint
     motion_adapter: "guoyww/animatediff-motion-adapter-v1-5-2"
@@ -54,11 +63,8 @@ video:
   motion_bucket_id: 127              # Higher = more motion
   noise_aug_strength: 0.02
   decode_chunk_size: 8
-  # --- Ken Burns fallback (CPU-only, no AI motion) ---
-  image_motion:
-    zoom_range: [1.0, 1.15]
-    pan_range: [-0.05, 0.05]
-    duration_per_scene: 5             # seconds
+  # --- Ken Burns fallback (legacy settings — see image_motion above) ---
+  # image_motion settings are defined above as the primary engine
 
 # --- Music Generation ---
 music:

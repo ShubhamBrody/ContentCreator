@@ -2,17 +2,24 @@
 ContentCreator - Video Generator
 
 Converts scene images / prompts into video clips. Supports:
-  1. AnimateDiff  (AI text-to-video, 24fps smooth motion, ~8-10 GB VRAM)
-  2. Stable Video Diffusion  (AI image-to-video, ~12 GB VRAM)
-  3. Image Motion  (Ken Burns zoom/pan, CPU-friendly fallback)
+  1. Image Motion  (Advanced Ken Burns — cinematic zoom/pan/drift on AI images,
+                    full-duration, CPU + GPU-accelerated resize, DEFAULT)
+  2. AnimateDiff  (AI text-to-video, 24fps smooth motion, ~8-10 GB VRAM)
+  3. Stable Video Diffusion  (AI image-to-video, ~12 GB VRAM)
+
+The default engine is "image_motion" because it produces full-duration clips
+that exactly match the narration audio, using the AI-generated scene images.
+AnimateDiff generates only a limited number of frames (typically ~1 second)
+and must be looped to fill longer narrations, causing visible repetition.
 """
 
 from __future__ import annotations
 
 import os
 import random
+from enum import Enum
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 import numpy as np
 import torch
@@ -25,6 +32,40 @@ from src.gpu_utils import free_vram, log_vram, unload_model
 from src.models.schemas import ParsedScript
 
 console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Motion presets for the advanced Ken Burns engine
+# ---------------------------------------------------------------------------
+
+class MotionPreset(Enum):
+    """Cinematic camera motion types for Ken Burns effect."""
+    ZOOM_IN = "zoom_in"               # Slow push-in (dramatic focus)
+    ZOOM_OUT = "zoom_out"             # Slow pull-out (reveal)
+    PAN_LEFT = "pan_left"             # Horizontal drift left
+    PAN_RIGHT = "pan_right"           # Horizontal drift right
+    PAN_UP = "pan_up"                 # Tilt up (establishing shot)
+    PAN_DOWN = "pan_down"             # Tilt down (reveal)
+    DRIFT_ZOOM_IN = "drift_zoom_in"   # Pan + slow zoom in
+    DRIFT_ZOOM_OUT = "drift_zoom_out" # Pan + slow zoom out
+
+
+# Cycle through these so consecutive scenes get different motions
+_MOTION_CYCLE: list[MotionPreset] = [
+    MotionPreset.ZOOM_IN,
+    MotionPreset.PAN_RIGHT,
+    MotionPreset.DRIFT_ZOOM_OUT,
+    MotionPreset.PAN_LEFT,
+    MotionPreset.ZOOM_OUT,
+    MotionPreset.DRIFT_ZOOM_IN,
+    MotionPreset.PAN_UP,
+    MotionPreset.PAN_DOWN,
+]
+
+
+def _ease_in_out(t: float) -> float:
+    """Smooth ease-in-out curve (cubic Hermite)."""
+    return t * t * (3.0 - 2.0 * t)
 
 
 class VideoGenerator:
@@ -59,11 +100,12 @@ class VideoGenerator:
         self.ad_width = ad_config.get("width", 512)
         self.ad_height = ad_config.get("height", 768)
 
-        # --- Image motion config (fallback) ---
+        # --- Advanced Image Motion config (primary) ---
         im_config = config.video.get("image_motion", {})
-        self.zoom_range: list[float] = im_config.get("zoom_range", [1.0, 1.15])
-        self.pan_range: list[float] = im_config.get("pan_range", [-0.05, 0.05])
+        self.zoom_range: list[float] = im_config.get("zoom_range", [1.0, 1.20])
+        self.pan_range: list[float] = im_config.get("pan_range", [-0.08, 0.08])
         self.duration_per_scene: float = im_config.get("duration_per_scene", 5)
+        self.motion_fps: int = im_config.get("fps", 24)
 
         self._pipe: Any = None
         self._motion_adapter: Any = None
@@ -168,6 +210,7 @@ class VideoGenerator:
         self,
         parsed_script: ParsedScript,
         output_dir: str,
+        audio_files: Optional[List[str]] = None,
     ) -> List[str]:
         """
         Generate video clips for each scene.
@@ -175,12 +218,31 @@ class VideoGenerator:
         Args:
             parsed_script: Parsed script with scenes
             output_dir: Directory to save video clips
+            audio_files: Optional list of per-scene audio paths. When
+                         provided, each video clip's duration is matched
+                         exactly to the corresponding audio duration, so
+                         the assembler never needs to loop or trim.
 
         Returns:
             List of paths to generated video clips
         """
         os.makedirs(output_dir, exist_ok=True)
         video_files: List[str] = []
+
+        # Pre-compute audio durations so video clips match narration exactly
+        audio_durations: list[Optional[float]] = []
+        if audio_files:
+            from moviepy import AudioFileClip  # type: ignore[import-untyped]
+            for af in audio_files:
+                if af and os.path.exists(af):
+                    try:
+                        aclip = AudioFileClip(af)
+                        audio_durations.append(aclip.duration)
+                        aclip.close()
+                    except Exception:
+                        audio_durations.append(None)
+                else:
+                    audio_durations.append(None)
 
         # Choose engine and load model
         if self.engine == "animatediff":
@@ -198,7 +260,7 @@ class VideoGenerator:
                 total=len(parsed_script.scenes),
             )
 
-            for scene in parsed_script.scenes:
+            for idx, scene in enumerate(parsed_script.scenes):
                 filename = f"scene_{scene.scene_number:03d}_video.mp4"
                 filepath = str(Path(output_dir) / filename)
 
@@ -210,7 +272,14 @@ class VideoGenerator:
                     ),
                 )
 
-                duration = scene.duration_seconds
+                # Use audio duration if available, otherwise script duration
+                if idx < len(audio_durations) and audio_durations[idx] is not None:
+                    duration = float(audio_durations[idx])  # type: ignore[arg-type]
+                else:
+                    duration = float(scene.duration_seconds)
+
+                # Minimum 1.5 s to avoid degenerate clips
+                duration = max(duration, 1.5)
 
                 if self.engine == "animatediff":
                     # AnimateDiff: text → animated video
@@ -225,14 +294,15 @@ class VideoGenerator:
                         )
                     self._generate_svd_clip(scene.image_path, filepath)
                 else:
-                    # Ken Burns fallback
+                    # Advanced Ken Burns — cinematic motion on AI image
                     if scene.image_path is None:
                         raise ValueError(
                             f"Scene {scene.scene_number} has no image. "
                             "Run image generation first."
                         )
+                    motion = _MOTION_CYCLE[idx % len(_MOTION_CYCLE)]
                     self._generate_motion_clip(
-                        scene.image_path, filepath, duration
+                        scene.image_path, filepath, duration, motion
                     )
 
                 video_files.append(filepath)
@@ -315,7 +385,7 @@ class VideoGenerator:
         self._frames_to_video(frames, output_path, self.fps)
 
     # =========================================================================
-    # Image Motion — Ken Burns effect (CPU-friendly fallback)
+    # Image Motion — Advanced Ken Burns (cinematic zoom / pan / drift)
     # =========================================================================
 
     def _generate_motion_clip(
@@ -323,43 +393,103 @@ class VideoGenerator:
         image_path: str,
         output_path: str,
         duration: float,
+        motion: MotionPreset = MotionPreset.ZOOM_IN,
     ) -> None:
-        """Generate a video clip with Ken Burns (zoom/pan) effect."""
-        from moviepy import ImageClip  # type: ignore[import-untyped]
+        """
+        Generate a high-quality Ken Burns video clip from an image.
 
-        image = Image.open(image_path).convert("RGB")
+        Uses smooth ease-in-out curves and configurable motion presets
+        so consecutive scenes feel visually distinct. The clip duration
+        matches the narration audio exactly.
+        """
+        from moviepy import ImageClip  # type: ignore[import-untyped]
+        from PIL import Image as PILImage
+
+        image = PILImage.open(image_path).convert("RGB")
+
+        # Up-scale the source image so crop regions stay sharp after resize
+        # We work at 2× internal resolution then down-scale when writing frames
+        base_w, base_h = image.size
+        work_scale = 2.0
+        work_w = int(base_w * work_scale)
+        work_h = int(base_h * work_scale)
+        image = image.resize((work_w, work_h), PILImage.LANCZOS)
         img_array = np.array(image)
 
-        # Random motion parameters
-        start_zoom = self.zoom_range[0]
-        end_zoom = random.uniform(self.zoom_range[0], self.zoom_range[1])
-        pan_x = random.uniform(self.pan_range[0], self.pan_range[1])
-        pan_y = random.uniform(self.pan_range[0], self.pan_range[1])
+        # ----- Motion parameters per preset -----
+        zoom_start = 1.0
+        zoom_end = 1.0
+        pan_x_start = 0.0
+        pan_x_end = 0.0
+        pan_y_start = 0.0
+        pan_y_end = 0.0
+
+        # Zoom range (fraction of image)
+        z_lo, z_hi = self.zoom_range  # e.g. [1.0, 1.20]
+        p_lo, p_hi = self.pan_range   # e.g. [-0.08, 0.08]
+
+        if motion == MotionPreset.ZOOM_IN:
+            zoom_start, zoom_end = 1.0, random.uniform(z_hi * 0.8, z_hi)
+        elif motion == MotionPreset.ZOOM_OUT:
+            zoom_start, zoom_end = random.uniform(z_hi * 0.8, z_hi), 1.0
+        elif motion == MotionPreset.PAN_LEFT:
+            pan_x_start = random.uniform(0.02, abs(p_hi))
+            pan_x_end = -pan_x_start
+        elif motion == MotionPreset.PAN_RIGHT:
+            pan_x_start = -random.uniform(0.02, abs(p_hi))
+            pan_x_end = -pan_x_start
+        elif motion == MotionPreset.PAN_UP:
+            pan_y_start = random.uniform(0.02, abs(p_hi))
+            pan_y_end = -pan_y_start
+        elif motion == MotionPreset.PAN_DOWN:
+            pan_y_start = -random.uniform(0.02, abs(p_hi))
+            pan_y_end = -pan_y_start
+        elif motion == MotionPreset.DRIFT_ZOOM_IN:
+            zoom_start, zoom_end = 1.0, random.uniform(z_hi * 0.7, z_hi)
+            pan_x_start = random.uniform(p_lo * 0.5, p_hi * 0.5)
+            pan_x_end = -pan_x_start
+            pan_y_start = random.uniform(p_lo * 0.3, p_hi * 0.3)
+            pan_y_end = -pan_y_start
+        elif motion == MotionPreset.DRIFT_ZOOM_OUT:
+            zoom_start, zoom_end = random.uniform(z_hi * 0.7, z_hi), 1.0
+            pan_x_start = random.uniform(p_lo * 0.5, p_hi * 0.5)
+            pan_x_end = -pan_x_start
+            pan_y_start = random.uniform(p_lo * 0.3, p_hi * 0.3)
+            pan_y_end = -pan_y_start
 
         h, w = img_array.shape[:2]
+        out_w, out_h = base_w, base_h  # final frame dimensions
 
         def make_frame(t: float) -> np.ndarray:
-            """Create a frame at time t with zoom/pan effect."""
-            progress_ratio = t / max(duration, 0.01)
+            """Produce one frame with smooth easing at time t."""
+            raw_t = t / max(duration, 0.01)
+            ease_t = _ease_in_out(raw_t)
 
-            # Interpolate zoom
-            zoom = start_zoom + (end_zoom - start_zoom) * progress_ratio
+            # Interpolate zoom & pan
+            zoom = zoom_start + (zoom_end - zoom_start) * ease_t
+            px = pan_x_start + (pan_x_end - pan_x_start) * ease_t
+            py = pan_y_start + (pan_y_end - pan_y_start) * ease_t
 
-            # Calculate crop region
-            crop_w = int(w / zoom)
-            crop_h = int(h / zoom)
+            # Crop region (smaller crop = more zoom)
+            crop_w = int(w / max(zoom, 1.001))
+            crop_h = int(h / max(zoom, 1.001))
 
-            # Center + pan offset
-            cx = w // 2 + int(pan_x * w * progress_ratio)
-            cy = h // 2 + int(pan_y * h * progress_ratio)
+            # Center with pan offset
+            cx = w // 2 + int(px * w)
+            cy = h // 2 + int(py * h)
 
-            # Clamp to image bounds
             x1 = max(0, cx - crop_w // 2)
             y1 = max(0, cy - crop_h // 2)
             x2 = min(w, x1 + crop_w)
             y2 = min(h, y1 + crop_h)
 
-            # Adjust if we hit the edge
+            # Clamp to avoid zero-size crops
+            if x2 - x1 < 2:
+                x1, x2 = 0, w
+            if y2 - y1 < 2:
+                y1, y2 = 0, h
+
+            # Re-adjust if we hit the border
             if x2 - x1 < crop_w:
                 x1 = max(0, x2 - crop_w)
             if y2 - y1 < crop_h:
@@ -367,23 +497,30 @@ class VideoGenerator:
 
             cropped = img_array[y1:y2, x1:x2]
 
-            # Resize back to original dimensions
-            from PIL import Image as PILImage
+            # Resize to output dimensions using high-quality resampling
+            frame_pil = PILImage.fromarray(cropped).resize(
+                (out_w, out_h), PILImage.LANCZOS
+            )
+            return np.array(frame_pil)
 
-            frame = PILImage.fromarray(cropped).resize((w, h), PILImage.LANCZOS)
-            return np.array(frame)
+        # Build the clip at the exact narration duration using VideoClip
+        from moviepy import VideoClip  # type: ignore[import-untyped]
 
-        clip = ImageClip(img_array, duration=duration)
-        clip = clip.with_fps(30).with_updated_frame_function(make_frame)
+        motion_clip = VideoClip(make_frame, duration=duration)
 
-        clip.write_videofile(
+        console.print(
+            f"[dim]Ken Burns ({motion.value}): {duration:.1f}s "
+            f"@ {self.motion_fps}fps, {out_w}×{out_h}[/dim]"
+        )
+
+        motion_clip.write_videofile(
             output_path,
-            fps=30,
+            fps=self.motion_fps,
             codec="libx264",
             audio=False,
             logger=None,
         )
-        clip.close()
+        motion_clip.close()
 
     # =========================================================================
     # Utility

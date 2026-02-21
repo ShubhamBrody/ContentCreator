@@ -96,9 +96,28 @@ class VideoAssembler:
                 audio_clip = AudioFileClip(audio_path)
                 # Extend or trim video to match audio length
                 if clip.duration < audio_clip.duration:
-                    # Loop video to match audio duration
-                    from moviepy.video.fx import Loop
-                    clip = clip.with_effects([Loop(duration=audio_clip.duration)])
+                    gap = audio_clip.duration - clip.duration
+                    ratio = audio_clip.duration / max(clip.duration, 0.01)
+
+                    if ratio <= 2.0:
+                        # Small gap: slow the clip down to fill the duration
+                        from moviepy.video.fx import MultiplySpeed
+                        slow_factor = clip.duration / audio_clip.duration
+                        clip = clip.with_effects(
+                            [MultiplySpeed(factor=slow_factor)]
+                        )
+                    else:
+                        # Large gap: loop is the only option but log a warning
+                        console.print(
+                            f"[yellow]Warning: Scene {i+1} video "
+                            f"({clip.duration:.1f}s) much shorter than "
+                            f"audio ({audio_clip.duration:.1f}s) — looping "
+                            f"(consider using image_motion engine)[/yellow]"
+                        )
+                        from moviepy.video.fx import Loop
+                        clip = clip.with_effects(
+                            [Loop(duration=audio_clip.duration)]
+                        )
                 else:
                     clip = clip.subclipped(0, audio_clip.duration)
                 clip = clip.with_audio(audio_clip)
