@@ -172,9 +172,49 @@ async def _progress_callback(
     # Total elapsed and total ETA
     if job["pipeline_started_at"] is not None:
         job["total_elapsed"] = round(now - job["pipeline_started_at"], 1)
-    done_time = sum(
-        st["elapsed"] for st in timings.values() if st["completed_at"] is not None
-    )
+    _refresh_timings(job)
+
+
+def _refresh_timings(job: Dict[str, Any]) -> None:
+    """Recalculate elapsed/ETA for all running stages and overall progress.
+
+    Called on every SSE tick so the frontend always sees live numbers,
+    not just snapshots from the last _progress_callback call.
+    """
+    now = time.time()
+    timings = job.get("stage_timings", {})
+    active = job.get("active_stages", [])
+
+    # Update elapsed for every running stage
+    for sid, st in timings.items():
+        if st["started_at"] is not None and st["completed_at"] is None:
+            st["elapsed"] = round(now - st["started_at"], 1)
+            original_eta = STAGE_ETA_ESTIMATES.get(sid, 30)
+            remaining = max(0, original_eta - st["elapsed"])
+            st["eta"] = round(remaining, 1)
+
+    # Granular overall progress: completed stages contribute 100%,
+    # running stages contribute proportional to elapsed / estimated time.
+    total = max(len(active), 1)
+    progress_sum = 0.0
+    for s in active:
+        status = job["stages"].get(s)
+        if status == "completed":
+            progress_sum += 1.0
+        elif status == "running" and s in timings:
+            st = timings[s]
+            est = STAGE_ETA_ESTIMATES.get(s, 30)
+            # Cap intra-stage progress at 95% to avoid showing 100% before done
+            intra = min(st["elapsed"] / max(est, 1), 0.95)
+            progress_sum += intra
+
+    job["progress"] = round((progress_sum / total) * 100, 1)
+
+    # Total elapsed
+    if job.get("pipeline_started_at") is not None:
+        job["total_elapsed"] = round(now - job["pipeline_started_at"], 1)
+
+    # Total remaining ETA
     remaining_est = sum(
         st["eta"] for st in timings.values() if st["completed_at"] is None
     )
@@ -313,6 +353,7 @@ async def progress_stream(job_id: str):
     async def stream():
         while True:
             if job_id in jobs:
+                _refresh_timings(jobs[job_id])
                 data = json.dumps(jobs[job_id], default=str)
                 yield f"data: {data}\n\n"
                 if jobs[job_id]["status"] in ("completed", "failed"):
