@@ -147,6 +147,15 @@ class ParsedScript(BaseModel):
         default="background music",
         description="Overall music style/prompt for the video"
     )
+    visual_style: str = Field(
+        default="",
+        description=(
+            "Detected art / visual style for image generation. "
+            "For known IPs this contains the franchise-specific style "
+            "(e.g. 'anime art style, Attack on Titan aesthetic'). "
+            "Empty when no specific style was detected."
+        ),
+    )
 
     @property
     def total_duration(self) -> float:

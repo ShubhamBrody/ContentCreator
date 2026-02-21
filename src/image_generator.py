@@ -43,11 +43,13 @@ class ImageGenerator:
         # Character sketch-style overrides
         self._character_style: Optional[str] = None
         self._characters: dict[str, CharacterDef] = {}
+        # Visual style detected from the script (e.g. "anime, Attack on Titan")
+        self._visual_style: str = ""
         self._pipe: Any = None
         self._refiner: Any = None
 
     # -----------------------------------------------------------------
-    # Character integration
+    # Character / style integration
     # -----------------------------------------------------------------
 
     def set_character_context(
@@ -63,6 +65,16 @@ class ImageGenerator:
         """
         self._characters = {c.name.lower(): c for c in characters}
         self._character_style = style
+
+    def set_visual_style(self, visual_style: str) -> None:
+        """
+        Set the visual / art style detected from the script.
+
+        When set, this overrides the default cinematic style suffix
+        so that all generated images match the source material
+        (e.g. anime style for Attack on Titan, game art for Far Cry).
+        """
+        self._visual_style = visual_style.strip()
 
     def _load_model(self) -> None:
         """Load SDXL pipeline onto GPU."""
@@ -316,13 +328,24 @@ class ImageGenerator:
         """
         Add quality / style suffix to a prompt.
 
-        If a character sketch style is active, use the sketch style suffix
-        instead of the default cinematic style.
+        Priority order:
+          1. Explicit character sketch style (stick_figure, cartoon, manga, etc.)
+          2. Visual style detected from the script (anime, game art, etc.)
+          3. Default cinematic style
         """
+        # 1. Explicit sketch style from character designer
         if self._character_style and self._character_style in self.SKETCH_STYLE_SUFFIXES:
             style_suffix = self.SKETCH_STYLE_SUFFIXES[self._character_style]
             return f"{prompt}, {style_suffix}"
 
+        # 2. Visual style detected from script context (known franchise/IP)
+        if self._visual_style:
+            return (
+                f"{prompt}, {self._visual_style}, "
+                f"high quality, detailed, masterpiece"
+            )
+
+        # 3. Default cinematic style (generic / original content)
         return (
             f"{prompt}, cinematic lighting, high quality, detailed, "
             f"8k resolution, professional photography"

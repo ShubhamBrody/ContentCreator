@@ -264,6 +264,14 @@ class Pipeline:
                 artifacts.parsed_script.characters = char_defs_basic
             self.image_generator.set_character_context(char_defs_basic, char_style)
 
+        # Pass the visual style detected by the LLM to the image generator
+        # so all images match the source material's art style
+        if parsed_script and parsed_script.visual_style:
+            self.image_generator.set_visual_style(parsed_script.visual_style)
+            console.print(
+                f"[cyan]Visual style: {parsed_script.visual_style}[/cyan]"
+            )
+
         # =================================================================
         # Stages 2+3: TTS ‖ Image Generation (concurrent)
         # TTS uses network/CPU (edge-tts), Image Gen uses GPU (SDXL).

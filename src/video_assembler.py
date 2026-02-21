@@ -22,6 +22,55 @@ from src.subtitle_generator import SubtitleSegment
 console = Console()
 
 
+def _resolve_font(font_name: str) -> str:
+    """
+    Resolve a font name to a full .ttf file path that Pillow / MoviePy can use.
+
+    MoviePy v2 delegates text rendering to Pillow which requires an actual
+    file path on Windows (font family names like 'Arial-Bold' don't work).
+    This function tries several strategies:
+      1. If font_name is already a valid file path, return it.
+      2. Look in the Windows Fonts directory for common bold variants.
+      3. Fall back to a guaranteed-present font (segoeui / tahoma / arial).
+    """
+    if os.path.isfile(font_name):
+        return font_name
+
+    fonts_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+
+    # Map friendly names to actual .ttf filenames
+    _FONT_MAP: dict[str, list[str]] = {
+        "arial-bold":    ["arialbd.ttf", "Arial-Bold.ttf"],
+        "arial":         ["arial.ttf"],
+        "impact":        ["impact.ttf"],
+        "calibri-bold":  ["calibrib.ttf"],
+        "segoe-ui-bold": ["segoeuib.ttf"],
+        "tahoma-bold":   ["tahomabd.ttf"],
+    }
+
+    # Try the requested font
+    key = font_name.lower().replace(" ", "-")
+    for candidates in [_FONT_MAP.get(key, []), [font_name, f"{font_name}.ttf"]]:
+        for cand in candidates:
+            full = os.path.join(fonts_dir, cand)
+            if os.path.isfile(full):
+                return full
+
+    # Fallback chain: try common bold fonts that ship with every Windows install
+    for fallback in ["arialbd.ttf", "impact.ttf", "segoeuib.ttf",
+                     "tahomabd.ttf", "calibrib.ttf", "arial.ttf"]:
+        full = os.path.join(fonts_dir, fallback)
+        if os.path.isfile(full):
+            console.print(
+                f"[yellow]Font '{font_name}' not found, falling back "
+                f"to {fallback}[/yellow]"
+            )
+            return full
+
+    # Last resort — return original name and let Pillow try
+    return font_name
+
+
 class VideoAssembler:
     """Assembles all generated assets into the final video."""
 
@@ -252,6 +301,7 @@ class VideoAssembler:
         stroke_color = sub_config.get("stroke_color", "black")
         stroke_width = sub_config.get("stroke_width", 2)
         position = sub_config.get("position", "bottom")
+        font_path = _resolve_font(sub_config.get("font", "Arial-Bold"))
 
         # Calculate Y position
         if position == "bottom":
@@ -274,7 +324,7 @@ class VideoAssembler:
                         stroke_width=stroke_width,
                         method="caption",
                         size=(width - 80, None),
-                        font="Arial-Bold",
+                        font=font_path,
                         duration=seg.end - seg.start,
                     )
                     .with_position(("center", y_pos))
