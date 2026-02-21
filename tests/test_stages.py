@@ -260,6 +260,10 @@ class TestSubtitleGeneration:
     """Test Whisper-based subtitle generation."""
 
     def test_subtitles_from_audio(self, config, tmp_dir):
+        import shutil
+        if not shutil.which("ffmpeg"):
+            pytest.skip("ffmpeg not on PATH – required by Whisper")
+
         from src.tts_engine import TTSEngine
         from src.subtitle_generator import SubtitleGenerator
 

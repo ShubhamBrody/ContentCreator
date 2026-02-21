@@ -89,7 +89,7 @@ class VideoAssembler:
             clip = VideoFileClip(clip_path)
 
             # Resize to target dimensions
-            clip = clip.resize(newsize=(target_w, target_h))
+            clip = clip.resized(new_size=(target_w, target_h))
 
             # Set duration to match voiceover audio if available
             if audio_path and os.path.exists(audio_path):
