@@ -419,6 +419,10 @@ class Pipeline:
         # =================================================================
         # Stage 5: Music Generation
         # =================================================================
+        # Flush VRAM left by SDXL / video stages to avoid CUDA corruption
+        from src.gpu_utils import free_vram as _flush_vram
+        _flush_vram()
+
         music_path: Optional[str] = None
         if "music_gen" in stages:
             if "music_gen" in resumed_stages:

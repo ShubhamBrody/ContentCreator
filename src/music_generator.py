@@ -41,6 +41,12 @@ class MusicGenerator:
             console.print("[dim]Music generation disabled.[/dim]")
             return
 
+        # Aggressively clear CUDA state left by previous stages (SDXL, video)
+        free_vram()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.ipc_collect()
+
         console.print("[cyan]Loading MusicGen model...[/cyan]")
         log_vram("before MusicGen load")
 
@@ -49,8 +55,9 @@ class MusicGenerator:
         self._processor = AutoProcessor.from_pretrained(self.model_id)
         self._model = MusicgenForConditionalGeneration.from_pretrained(self.model_id)
 
-        dtype = torch.float16 if self.config.half_precision else torch.float32
-        self._model = self._model.to(dtype).to(self.config.device)
+        # MusicGen-small is only ~300 MB — always use float32 to avoid
+        # cuBLAS float16 numerical instability & CUDA indexing corruption.
+        self._model = self._model.to(torch.float32).to(self.config.device)
 
         log_vram("after MusicGen load")
         console.print("[green]✓ MusicGen model loaded[/green]")
@@ -116,14 +123,39 @@ class MusicGenerator:
         tokens_per_second = 50  # approximate
         max_new_tokens = int(duration * tokens_per_second)
 
-        with torch.no_grad():
-            audio_values = self._model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-            )
+        audio_values = None
+        for attempt in range(2):
+            try:
+                with torch.no_grad():
+                    audio_values = self._model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                    )
+                break  # success
+            except RuntimeError as exc:
+                if attempt == 0 and "CUDA" in str(exc):
+                    console.print(
+                        f"[yellow]⚠ CUDA error during MusicGen, resetting and retrying...[/yellow]"
+                    )
+                    # Full CUDA reset: unload model, clear state, reload
+                    self.unload()
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        torch.cuda.ipc_collect()
+                    self._load_model()
+                    # Re-tokenize after reload
+                    inputs = self._processor(
+                        text=[prompt],
+                        padding=True,
+                        return_tensors="pt",
+                    )
+                    inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
+                    continue
+                raise  # non-CUDA error or second attempt failed
 
         # Save as WAV
-        audio_data = audio_values[0, 0].cpu().float().numpy()  # float16→float32 for scipy
+        audio_data = audio_values[0, 0].cpu().float().numpy()
         scipy.io.wavfile.write(
             output_path,
             rate=sample_rate,
