@@ -40,7 +40,7 @@ video:
   # --- AnimateDiff (primary — text-to-animated-video, ~8-10 GB VRAM) ---
   animatediff:
     base_model: "SG161222/Realistic_Vision_V5.1_noVAE"   # SD 1.5 checkpoint
-    motion_adapter: "guanzhi/animatediff-motion-adapter-v1-5-3"
+    motion_adapter: "guoyww/animatediff-motion-adapter-v1-5-2"
     num_frames: 16                    # frames per clip (16-32; higher = more VRAM)
     fps: 24                           # output frame rate
     guidance_scale: 7.5

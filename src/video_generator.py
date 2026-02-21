@@ -50,7 +50,7 @@ class VideoGenerator:
             "base_model", "SG161222/Realistic_Vision_V5.1_noVAE"
         )
         self.ad_motion_adapter = ad_config.get(
-            "motion_adapter", "guanzhi/animatediff-motion-adapter-v1-5-3"
+            "motion_adapter", "guoyww/animatediff-motion-adapter-v1-5-2"
         )
         self.ad_num_frames = ad_config.get("num_frames", 16)
         self.ad_fps = ad_config.get("fps", 24)
