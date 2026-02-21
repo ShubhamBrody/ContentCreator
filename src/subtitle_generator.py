@@ -25,7 +25,9 @@ def _ensure_ffmpeg_on_path() -> None:
     Whisper shells out to ``ffmpeg`` to decode audio.  If the user
     doesn't have a system-wide install, we fall back to the copy
     bundled by *imageio-ffmpeg* (a MoviePy dependency already present
-    in the venv).
+    in the venv).  That binary has a non-standard name like
+    ``ffmpeg-win-x86_64-v7.1.exe``, so we create a ``ffmpeg.exe``
+    shim next to it that Whisper (and any subprocess) can find.
     """
     if shutil.which("ffmpeg"):
         return  # already on PATH
@@ -34,6 +36,17 @@ def _ensure_ffmpeg_on_path() -> None:
         import imageio_ffmpeg  # type: ignore[import-untyped]
         ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
         ffmpeg_dir = str(Path(ffmpeg_exe).parent)
+
+        # Create a ffmpeg.exe shim if the bundled binary has a different name
+        shim = Path(ffmpeg_dir) / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+        if not shim.exists():
+            try:
+                # Try symlink first (no extra disk space)
+                shim.symlink_to(ffmpeg_exe)
+            except OSError:
+                # Symlinks may need admin on Windows — fall back to copy
+                shutil.copy2(ffmpeg_exe, str(shim))
+
         os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
     except Exception:
         pass  # last resort: let Whisper fail with a clear error
